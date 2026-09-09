@@ -1,0 +1,194 @@
+import json
+import math
+import tkinter as tk
+from tkinter import ttk
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+
+
+class OperatorGui(Node):
+    def __init__(self) -> None:
+        super().__init__("aid_operator_gui")
+        self.control_publisher = self.create_publisher(String, "/aid/control", 10)
+        self.create_subscription(String, "/aid/system/status", self.system_callback, 10)
+        self.create_subscription(String, "/aid/motor/status", self.motor_callback, 20)
+        self.create_subscription(String, "/aid/rf/status", self.rf_callback, 10)
+        self.create_subscription(String, "/aid/detection", self.detection_callback, 20)
+        self.create_subscription(String, "/aid/compass/status", self.compass_callback, 10)
+
+        self.root = tk.Tk()
+        self.root.title("AID Direction Finder")
+        self.root.geometry("760x560")
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.mode_text = tk.StringVar(value="Mode: unknown")
+        self.motor_text = tk.StringVar(value="Motor: waiting")
+        self.rf_text = tk.StringVar(value="RF: waiting")
+        self.compass_text = tk.StringVar(value="Heading: waiting")
+        self.candidate_text = tk.StringVar(value="No candidate")
+        self.speed = tk.DoubleVar(value=30.0)
+        self.manual_target = tk.StringVar(value="0")
+        self.rf_selection = tk.StringVar(value="2.4")
+        self.center = tk.StringVar(value="5745")
+        self.span = tk.StringVar(value="20")
+        self.focus_available = False
+        self.build_ui()
+
+    def build_ui(self) -> None:
+        root = ttk.Frame(self.root, padding=14)
+        root.pack(fill="both", expand=True)
+
+        mode_frame = ttk.LabelFrame(root, text="Operation", padding=10)
+        mode_frame.pack(fill="x")
+        for label, mode in (("Calibrate", "calibrate"), ("Explore", "explore"), ("Stop", "idle")):
+            ttk.Button(mode_frame, text=label, command=lambda selected=mode: self.send(command="mode", mode=selected)).pack(side="left", padx=4)
+        self.focus_button = ttk.Button(mode_frame, text="Focus best", command=lambda: self.send(command="focus"), state="disabled")
+        self.focus_button.pack(side="left", padx=4)
+        ttk.Label(mode_frame, textvariable=self.mode_text).pack(side="right")
+
+        motor_frame = ttk.LabelFrame(root, text="Rotation speed", padding=10)
+        motor_frame.pack(fill="x", pady=(10, 0))
+        ttk.Scale(motor_frame, from_=1.0, to=90.0, variable=self.speed, orient="horizontal").pack(side="left", fill="x", expand=True)
+        self.speed_label = ttk.Label(motor_frame, width=10)
+        self.speed_label.pack(side="left", padx=8)
+        ttk.Button(motor_frame, text="Apply", command=self.apply_speed).pack(side="left")
+        self.speed.trace_add("write", lambda *_: self.speed_label.configure(text=f"{self.speed.get():.1f} deg/s"))
+        self.speed.set(30.0)
+
+        target_frame = ttk.LabelFrame(root, text="Manual focus", padding=10)
+        target_frame.pack(fill="x", pady=(10, 0))
+        ttk.Label(target_frame, text="Orientation").pack(side="left")
+        ttk.Spinbox(
+            target_frame,
+            from_=0.0,
+            to=360.0,
+            increment=1.0,
+            textvariable=self.manual_target,
+            width=8,
+        ).pack(side="left", padx=8)
+        ttk.Label(target_frame, text="deg").pack(side="left")
+        ttk.Button(target_frame, text="Focus orientation", command=self.apply_manual_target).pack(side="left", padx=12)
+
+        rf_frame = ttk.LabelFrame(root, text="RF scan", padding=10)
+        rf_frame.pack(fill="x", pady=(10, 0))
+        for label, value in (("Dual", "dual"), ("2.4 GHz", "2.4"), ("5.8 GHz", "5.8"), ("Custom", "custom")):
+            ttk.Radiobutton(rf_frame, text=label, variable=self.rf_selection, value=value).pack(side="left")
+        ttk.Label(rf_frame, text="Center MHz").pack(side="left", padx=(14, 4))
+        ttk.Entry(rf_frame, textvariable=self.center, width=8).pack(side="left")
+        ttk.Label(rf_frame, text="Span MHz").pack(side="left", padx=(8, 4))
+        ttk.Entry(rf_frame, textvariable=self.span, width=6).pack(side="left")
+        ttk.Button(rf_frame, text="Apply", command=self.apply_rf).pack(side="right")
+
+        status_frame = ttk.LabelFrame(root, text="Live status", padding=10)
+        status_frame.pack(fill="both", expand=True, pady=(10, 0))
+        for variable in (self.motor_text, self.rf_text, self.compass_text, self.candidate_text):
+            ttk.Label(status_frame, textvariable=variable, anchor="w", justify="left", wraplength=700).pack(fill="x", pady=5)
+
+    def send(self, command: str = "mode", mode: str | None = None, **fields) -> None:
+        if mode is not None:
+            fields["mode"] = mode
+        fields["command"] = command
+        self.control_publisher.publish(String(data=json.dumps(fields, separators=(",", ":"))))
+
+    def apply_speed(self) -> None:
+        self.send(command="speed", speed_dps=self.speed.get())
+
+    def apply_manual_target(self) -> None:
+        try:
+            target = float(self.manual_target.get())
+            if not math.isfinite(target) or not 0.0 <= target <= 360.0:
+                raise ValueError
+            self.send(command="target", angle_deg=target % 360.0)
+        except ValueError:
+            self.motor_text.set("Motor: orientation must be between 0 and 360 degrees")
+
+    def apply_rf(self) -> None:
+        try:
+            self.send(command="rf", selection=self.rf_selection.get(), center_mhz=float(self.center.get()), span_mhz=float(self.span.get()))
+        except ValueError:
+            self.rf_text.set("RF: center and span must be numbers")
+
+    def system_callback(self, message: String) -> None:
+        data = self.decode(message)
+        phase = data.get("phase", "")
+        band = data.get("active_band", "")
+        remaining = float(data.get("switch_remaining_s", 0.0))
+        suffix = f" | {phase} {band}" if phase else ""
+        if remaining > 0.0:
+            suffix += f" | resume in {remaining:.1f}s"
+        self.mode_text.set(f"Mode: {data.get('mode', 'unknown')}{suffix}")
+
+    def motor_callback(self, message: String) -> None:
+        data = self.decode(message)
+        if not data.get("connected", False):
+            self.motor_text.set(f"Motor: disconnected ({data.get('error', 'waiting')})")
+            return
+        self.motor_text.set(
+            f"Motor: {data.get('mode')} | angle {float(data.get('angle_deg', 0)):.1f} deg | "
+            f"speed {float(data.get('speed_dps', 0)):.1f} deg/s"
+        )
+
+    def rf_callback(self, message: String) -> None:
+        data = self.decode(message)
+        if not data.get("connected", False):
+            self.rf_text.set(f"RF: {data.get('state')} ({data.get('error', 'waiting')})")
+            return
+        self.rf_text.set(
+            f"RF: {data.get('state')} | {data.get('selection', '')} "
+            f"{data.get('start_mhz', '')}-{data.get('stop_mhz', '')} MHz"
+        )
+
+    def compass_callback(self, message: String) -> None:
+        data = self.decode(message)
+        self.compass_text.set(f"Relative heading: {float(data.get('relative_heading_deg', 0)):.1f} deg")
+
+    def detection_callback(self, message: String) -> None:
+        data = self.decode(message)
+        best = data.get("best_candidate")
+        self.focus_available = bool(best and best.get("viable"))
+        self.focus_button.configure(state="normal" if self.focus_available else "disabled")
+        if best:
+            self.candidate_text.set(
+                f"Best candidate: {float(best['frequency_mhz']):.3f} MHz | "
+                f"antenna {float(best['antenna_angle_deg']):.1f} deg | "
+                f"relative bearing {float(best['relative_bearing_deg']):.1f} deg | "
+                f"delta {float(best['delta_db']):.1f} dB | z {float(best['z_score']):.1f}"
+            )
+        else:
+            self.candidate_text.set(
+                f"Detection: {data.get('reason', 'waiting')} | baseline samples {data.get('baseline_samples', 0)}"
+            )
+
+    @staticmethod
+    def decode(message: String) -> dict:
+        try:
+            return json.loads(message.data)
+        except json.JSONDecodeError:
+            return {}
+
+    def spin_once(self) -> None:
+        if rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.0)
+            self.root.after(20, self.spin_once)
+
+    def close(self) -> None:
+        self.root.quit()
+
+    def run(self) -> None:
+        self.root.after(20, self.spin_once)
+        self.root.mainloop()
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = OperatorGui()
+    try:
+        node.run()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
