@@ -17,6 +17,8 @@ class DetectorNode(Node):
         self.declare_parameter("minimum_delta_db", 6.0)
         self.declare_parameter("minimum_z_score", 4.0)
         self.declare_parameter("std_floor_db", 1.5)
+        # Flat [low, high, low, high, ...] pairs; default masks own hotspot on Wi-Fi channel 36.
+        self.declare_parameter("excluded_ranges_mhz", [5170.0, 5190.0])
         self.baseline_path = Path(str(self.get_parameter("baseline_path").value))
         self.baseline = BaselineModel()
         try:
@@ -57,6 +59,13 @@ class DetectorNode(Node):
     def heading_callback(self, message: Float32) -> None:
         self.relative_heading = float(message.data)
 
+    def excluded_ranges(self) -> list[tuple[float, float]]:
+        bounds = [float(value) for value in self.get_parameter("excluded_ranges_mhz").value]
+        if len(bounds) % 2:
+            self.get_logger().warning("excluded_ranges_mhz must contain low/high pairs; ignoring")
+            return []
+        return [(bounds[index], bounds[index + 1]) for index in range(0, len(bounds), 2)]
+
     def sweep_callback(self, message: String) -> None:
         try:
             sweep = json.loads(message.data)
@@ -72,6 +81,7 @@ class DetectorNode(Node):
                     float(self.get_parameter("minimum_delta_db").value),
                     float(self.get_parameter("minimum_z_score").value),
                     float(self.get_parameter("std_floor_db").value),
+                    self.excluded_ranges(),
                 )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             self.get_logger().warning(f"Invalid RF sweep: {error}")

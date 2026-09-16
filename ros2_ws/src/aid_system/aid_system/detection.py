@@ -57,6 +57,7 @@ class BaselineModel:
         minimum_delta_db: float,
         minimum_z_score: float,
         std_floor_db: float,
+        excluded_ranges_mhz: list[tuple[float, float]] | None = None,
     ) -> dict:
         key = configuration_key(sweep)
         stats = self.configurations.get(key)
@@ -75,7 +76,14 @@ class BaselineModel:
             (observed[index] - expected[index]) / deviations[index]
             for index in range(len(observed))
         ]
-        index = max(range(len(scores)), key=scores.__getitem__)
+        allowed = [
+            index
+            for index in range(len(scores))
+            if not self._excluded(sweep, index, radius, excluded_ranges_mhz)
+        ]
+        if not allowed:
+            return {"viable": False, "reason": "all_bins_excluded"}
+        index = max(allowed, key=scores.__getitem__)
         delta_db = observed[index] - expected[index]
         return {
             "viable": scores[index] >= minimum_z_score and delta_db >= minimum_delta_db,
@@ -88,6 +96,24 @@ class BaselineModel:
             "noise_floor_dbm": round(statistics.median(values), 3),
             "baseline_samples": stats["count"],
         }
+
+    @staticmethod
+    def _excluded(
+        sweep: dict,
+        index: int,
+        radius: int,
+        excluded_ranges_mhz: list[tuple[float, float]] | None,
+    ) -> bool:
+        if not excluded_ranges_mhz:
+            return False
+        step = float(sweep["step_mhz"])
+        frequency = float(sweep["start_mhz"]) + index * step
+        # Widen by the smoothing radius so excluded energy cannot leak into neighbours.
+        margin = radius * step
+        return any(
+            low - margin <= frequency <= high + margin
+            for low, high in excluded_ranges_mhz
+        )
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
