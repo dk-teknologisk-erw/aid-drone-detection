@@ -1,0 +1,73 @@
+{
+  mode: "router",
+
+  listen: {
+    endpoints: [
+      "tcp/0.0.0.0:7447",
+    ],
+  },
+
+  scouting: {
+    multicast: {
+      enabled: false,
+    },
+  },
+
+  plugins: {
+    ros2dds: {
+      domain: 0,
+      ros_localhost_only: true,
+      ros_automatic_discovery_range: "LOCALHOST",
+
+      allow: {
+        publishers: [
+          "^/aid/compass/relative_heading_deg$",
+          "^/aid/compass/status$",
+          "^/aid/compass/zero$",
+          "^/aid/control$",
+          "^/aid/detection$",
+          "^/aid/detector/mode$",
+          "^/aid/detector/status$",
+          "^/aid/motor/angle_deg$",
+          "^/aid/motor/mode$",
+          "^/aid/motor/speed_dps$",
+          "^/aid/motor/status$",
+          "^/aid/motor/target_deg$",
+          "^/aid/motor/zero_deg$",
+          "^/aid/rf/config$",
+          "^/aid/rf/status$",
+          "^/aid/rf/sweep$",
+          "^/aid/system/status$",
+          "^/aid_camera/image_raw/compressed$",
+        ],
+
+        subscribers: [
+          "^/aid/compass/relative_heading_deg$",
+          "^/aid/compass/status$",
+          "^/aid/compass/zero$",
+          "^/aid/control$",
+          "^/aid/detection$",
+          "^/aid/detector/mode$",
+          "^/aid/detector/status$",
+          "^/aid/motor/angle_deg$",
+          "^/aid/motor/mode$",
+          "^/aid/motor/speed_dps$",
+          "^/aid/motor/status$",
+          "^/aid/motor/target_deg$",
+          "^/aid/motor/zero_deg$",
+          "^/aid/rf/config$",
+          "^/aid/rf/status$",
+          "^/aid/rf/sweep$",
+          "^/aid/system/status$",
+          "^/aid_camera/image_raw/compressed$",
+        ],
+
+        service_servers: [],
+        service_clients: [],
+        action_servers: [],
+        action_clients: [],
+      },
+    },
+  },
+}
+
