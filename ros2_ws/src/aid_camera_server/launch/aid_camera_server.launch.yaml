@@ -1,0 +1,14 @@
+launch:
+  - arg:
+      name: params_file
+      default: "$(find-pkg-share aid_camera_server)/config/aid_camera_server.yaml"
+  - node:
+      pkg: aid_camera_server
+      exec: aid_camera_server_node
+      name: aid_camera_server
+      namespace: aid_camera
+      output: screen
+      respawn: "true"
+      respawn_delay: 2.0
+      param:
+        - from: "$(var params_file)"

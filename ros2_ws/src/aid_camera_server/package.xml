@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>aid_camera_server</name>
+  <version>0.1.0</version>
+  <description>Single-camera Basler pylon publisher for ROS 2.</description>
+  <maintainer email="info@teknologisk.dk">Danish Technological Institute</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>camera_info_manager</depend>
+  <depend>image_transport</depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+
+  <exec_depend>compressed_image_transport</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

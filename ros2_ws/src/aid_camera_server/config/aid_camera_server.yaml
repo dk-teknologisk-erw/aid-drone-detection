@@ -1,0 +1,12 @@
+aid_camera_server:
+  ros__parameters:
+    serial_number: ""
+    frame_id: aid_camera_optical_frame
+    camera_info_url: ""
+    frame_rate_hz: 1.0
+    exposure_auto: true
+    exposure_time_us: 3000.0
+    gain_auto: true
+    gain_db: 0.0
+    grab_timeout_ms: 2000
+    reconnect_delay_ms: 1000
