@@ -12,11 +12,11 @@ The combined launch starts `aid_camera_server` and all `aid_system` Pi nodes wit
 ROS domain 0 and localhost-only DDS discovery. The system service installation
 and management commands are documented in `../SETUP.md`.
 
-Run the host GUI after building the same workspace on the host:
+Build and run only the GUI package on the host PC (no Pylon/camera SDK needed):
 
 ```bash
 sudo apt install python3-tk python3-pil python3-pil.imagetk
-source /opt/ros/jazzy/setup.bash
+./build_pc.sh
 source install/setup.bash
 ros2 launch aid_system host_gui.launch.py
 ```

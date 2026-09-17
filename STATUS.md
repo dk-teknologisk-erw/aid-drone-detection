@@ -46,12 +46,15 @@ Bridge Pi ROS to Zenoh:
 zenoh-bridge-ros2dds router -l tcp/0.0.0.0:7447
 ```
 
-On the host, build the same workspace, install `python3-tk`, connect the bridge, and start the GUI:
+On the host, install the GUI dependencies, build only `aid_system`, connect the bridge, and start the GUI:
 
 ```bash
+sudo apt install python3-tk python3-pil python3-pil.imagetk
+cd ros2_ws
+./build_pc.sh
 zenoh-bridge-ros2dds client -e tcp/<PI_IP>:7447
 source /opt/ros/jazzy/setup.bash
-source ros2_ws/install/setup.bash
+source install/setup.bash
 ros2 launch aid_system host_gui.launch.py
 ```
 
