@@ -14,6 +14,8 @@ from .camera_preview import decode_preview
 
 
 PREVIEW_SIZE = (480, 270)
+BASE_WINDOW_SIZE = (760, 560)
+PREVIEW_WINDOW_SIZE = (760, 880)
 
 
 class OperatorGui(Node):
@@ -29,7 +31,7 @@ class OperatorGui(Node):
 
         self.root = tk.Tk()
         self.root.title("AID Direction Finder")
-        self.root.geometry("760x560")
+        self.root.geometry(f"{BASE_WINDOW_SIZE[0]}x{BASE_WINDOW_SIZE[1]}")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.mode_text = tk.StringVar(value="Mode: unknown")
         self.motor_text = tk.StringVar(value="Motor: waiting")
@@ -42,7 +44,8 @@ class OperatorGui(Node):
         self.center = tk.StringVar(value="5745")
         self.span = tk.StringVar(value="20")
         self.focus_available = False
-        self.preview_window: tk.Toplevel | None = None
+        self.preview_visible = False
+        self.preview_frame: ttk.LabelFrame | None = None
         self.preview_label: ttk.Label | None = None
         self.preview_status = tk.StringVar(value="Waiting for camera...")
         self.preview_subscription = None
@@ -62,7 +65,8 @@ class OperatorGui(Node):
             ttk.Button(mode_frame, text=label, command=lambda selected=mode: self.send(command="mode", mode=selected)).pack(side="left", padx=4)
         self.focus_button = ttk.Button(mode_frame, text="Focus best", command=lambda: self.send(command="focus"), state="disabled")
         self.focus_button.pack(side="left", padx=4)
-        ttk.Button(mode_frame, text="Preview", command=self.open_preview).pack(side="left", padx=4)
+        self.preview_button = ttk.Button(mode_frame, text="Preview", command=self.toggle_preview)
+        self.preview_button.pack(side="left", padx=4)
         ttk.Label(mode_frame, textvariable=self.mode_text).pack(side="right")
 
         motor_frame = ttk.LabelFrame(root, text="Rotation speed", padding=10)
@@ -100,8 +104,17 @@ class OperatorGui(Node):
 
         status_frame = ttk.LabelFrame(root, text="Live status", padding=10)
         status_frame.pack(fill="both", expand=True, pady=(10, 0))
+        self.status_frame = status_frame
         for variable in (self.motor_text, self.rf_text, self.compass_text, self.candidate_text):
             ttk.Label(status_frame, textvariable=variable, anchor="w", justify="left", wraplength=700).pack(fill="x", pady=5)
+
+        self.preview_frame = ttk.LabelFrame(root, text="Camera preview", padding=10)
+        image_frame = ttk.Frame(self.preview_frame, width=PREVIEW_SIZE[0], height=PREVIEW_SIZE[1])
+        image_frame.pack()
+        image_frame.pack_propagate(False)
+        self.preview_label = ttk.Label(image_frame, text="Waiting for camera...", anchor="center")
+        self.preview_label.pack(fill="both", expand=True)
+        ttk.Label(self.preview_frame, textvariable=self.preview_status, anchor="w").pack(fill="x", pady=(8, 0))
 
     def send(self, command: str = "mode", mode: str | None = None, **fields) -> None:
         if mode is not None:
@@ -178,26 +191,24 @@ class OperatorGui(Node):
                 f"Detection: {data.get('reason', 'waiting')} | baseline samples {data.get('baseline_samples', 0)}"
             )
 
+    def toggle_preview(self) -> None:
+        if self.preview_visible:
+            self.close_preview()
+        else:
+            self.open_preview()
+
     def open_preview(self) -> None:
-        if self.preview_window is not None:
-            self.preview_window.lift()
-            self.preview_window.focus_force()
+        if self.preview_visible or self.preview_frame is None:
             return
 
-        window = tk.Toplevel(self.root)
-        window.title("Camera Preview")
-        window.resizable(False, False)
-        window.protocol("WM_DELETE_WINDOW", self.close_preview)
-        self.preview_window = window
-
-        frame = ttk.Frame(window, padding=10)
-        frame.pack(fill="both", expand=True)
-        image_frame = ttk.Frame(frame, width=PREVIEW_SIZE[0], height=PREVIEW_SIZE[1])
-        image_frame.pack()
-        image_frame.pack_propagate(False)
-        self.preview_label = ttk.Label(image_frame, text="Waiting for camera...", anchor="center")
-        self.preview_label.pack(fill="both", expand=True)
-        ttk.Label(frame, textvariable=self.preview_status, anchor="w").pack(fill="x", pady=(8, 0))
+        self.preview_frame.pack(
+            fill="x",
+            pady=(10, 0),
+            before=self.status_frame,
+        )
+        self.root.geometry(f"{PREVIEW_WINDOW_SIZE[0]}x{PREVIEW_WINDOW_SIZE[1]}")
+        self.preview_visible = True
+        self.preview_button.configure(text="Hide Preview")
 
         self.preview_data = None
         self.preview_frame_number = 0
@@ -210,25 +221,29 @@ class OperatorGui(Node):
             qos_profile_sensor_data,
         )
         self.preview_status.set(f"Waiting for {camera_topic}")
-        window.after(100, self.refresh_preview)
+        self.root.after(100, self.refresh_preview)
 
     def close_preview(self) -> None:
         if self.preview_subscription is not None:
             self.destroy_subscription(self.preview_subscription)
             self.preview_subscription = None
-        if self.preview_window is not None:
-            self.preview_window.destroy()
-        self.preview_window = None
-        self.preview_label = None
+        if self.preview_frame is not None:
+            self.preview_frame.pack_forget()
+        self.preview_visible = False
+        self.preview_button.configure(text="Preview")
+        self.root.geometry(f"{BASE_WINDOW_SIZE[0]}x{BASE_WINDOW_SIZE[1]}")
         self.preview_data = None
         self.preview_photo = None
+        if self.preview_label is not None:
+            self.preview_label.configure(image="", text="Waiting for camera...")
+        self.preview_status.set("Waiting for camera...")
 
     def camera_callback(self, message: CompressedImage) -> None:
         self.preview_data = bytes(message.data)
         self.preview_frame_number += 1
 
     def refresh_preview(self) -> None:
-        if self.preview_window is None or self.preview_label is None:
+        if not self.preview_visible or self.preview_label is None:
             return
         if self.preview_data is not None and self.preview_frame_number != self.displayed_frame_number:
             try:
@@ -239,7 +254,7 @@ class OperatorGui(Node):
                 self.displayed_frame_number = self.preview_frame_number
             except (OSError, UnidentifiedImageError) as error:
                 self.preview_status.set(f"Decode error: {error}")
-        self.preview_window.after(100, self.refresh_preview)
+        self.root.after(100, self.refresh_preview)
 
     @staticmethod
     def decode(message: String) -> dict:

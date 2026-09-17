@@ -21,6 +21,6 @@ source install/setup.bash
 ros2 launch aid_system host_gui.launch.py
 ```
 
-Click **Preview** to open the on-demand compressed camera stream.
+Click **Preview** to show or hide the compressed camera stream inside the main GUI window.
 
 See `../STATUS.md` for MCU flashing, Zenoh commands, topics, and current status.

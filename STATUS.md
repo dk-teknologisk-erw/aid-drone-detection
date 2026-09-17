@@ -8,7 +8,7 @@
 - `rf_sweep`: reconnecting RF Explorer publisher with 2.4 GHz, 5.8 GHz, and custom center/span selection.
 - `detector`: persistent per-frequency-bin baselines and best candidates kept separately for 2.4 and 5.8 GHz, with one normalized best candidate across both bands.
 - `system_control`: calibrate/explore/focus/stop state handling. Dual calibration/explore scans one revolution per band, stops for at least five seconds while switching, then repeats. Focus Best switches to the winning candidate's band before pointing.
-- `operator_gui`: host Tk GUI for modes, speed, Dual/2.4/5.8/custom RF selection, scan phase/status, candidate focus, manual orientation focus, and an on-demand compressed camera Preview window.
+- `operator_gui`: host Tk GUI for modes, speed, Dual/2.4/5.8/custom RF selection, scan phase/status, candidate focus, manual orientation focus, and an on-demand embedded compressed camera Preview panel.
 - `aid_motor_controller.ino`: Pico firmware with 30 degrees/s2 acceleration/deceleration, adjustable speed, target motion, stop/zero, 10 Hz JSON telemetry, and active-low A4988 enable on GPIO 2. Coil power is disabled while stopped; a 1.5-second command watchdog stops motion after bridge/USB loss.
 - `aid_bringup`: combines the camera launch and all Pi-side AID nodes under one launch. `aid-ros2-bringup.service` provides root-managed start/stop/enable with graceful ROS shutdown.
 
@@ -58,7 +58,7 @@ source install/setup.bash
 ros2 launch aid_system host_gui.launch.py
 ```
 
-Install `python3-pil` and `python3-pil.imagetk` on the host for Preview. The Preview button opens a fixed 480 x 270 window and subscribes to `/aid_camera/image_raw/compressed` only while open.
+Install `python3-pil` and `python3-pil.imagetk` on the host for Preview. The Preview button expands the main window with a fixed 480 x 270 panel and subscribes to `/aid_camera/image_raw/compressed` only while visible.
 
 Use the same `ROS_DOMAIN_ID` on both systems. Select an RF range, run Calibration with no drone present, then switch to Explore. Focus best becomes available only for a viable outlier.
 
