@@ -4,7 +4,9 @@ const uint8_t ENABLE_PIN = 2;
 const float STEPS_PER_REVOLUTION = 120.0f * 16.0f;
 const unsigned long STATUS_INTERVAL_MS = 100;
 const unsigned long COMMAND_TIMEOUT_MS = 1500;
-const unsigned long STEP_PULSE_US = 2000;
+const unsigned long STEP_PULSE_US = 50;
+const float ACCELERATION_DPS2 = 30.0f;
+const float MINIMUM_MOTION_SPEED_DPS = 2.0f;
 
 enum MotorMode { STOPPED, EXPLORING, FOCUSING };
 
@@ -12,7 +14,9 @@ MotorMode mode = STOPPED;
 float angleDeg = 0.0f;
 float targetDeg = 0.0f;
 float speedDps = 30.0f;
+float currentSpeedDps = 0.0f;
 unsigned long lastStepUs = 0;
+unsigned long lastMotionUpdateUs = 0;
 unsigned long lastStatusMs = 0;
 unsigned long lastCommandMs = 0;
 String inputLine;
@@ -101,16 +105,42 @@ void stepMotor(bool positive)
 
 void updateMotor()
 {
+  unsigned long now = micros();
+  float elapsedSeconds = (now - lastMotionUpdateUs) / 1000000.0f;
+  lastMotionUpdateUs = now;
+
   if (mode != STOPPED && millis() - lastCommandMs > COMMAND_TIMEOUT_MS) {
     mode = STOPPED;
   }
   if (mode == STOPPED) {
+    currentSpeedDps = 0.0f;
     setDriverEnabled(false);
     return;
   }
   setDriverEnabled(true);
-  float stepIntervalUs = 1000000.0f * 360.0f / (speedDps * STEPS_PER_REVOLUTION);
-  unsigned long now = micros();
+
+  float desiredSpeedDps = speedDps;
+  float difference = 0.0f;
+  if (mode == FOCUSING) {
+    difference = shortestDifference(targetDeg, angleDeg);
+    float stoppingSpeedDps = sqrt(2.0f * ACCELERATION_DPS2 * abs(difference));
+    desiredSpeedDps = min(speedDps, stoppingSpeedDps);
+    if (abs(difference) <= (180.0f / STEPS_PER_REVOLUTION)) {
+      mode = STOPPED;
+      currentSpeedDps = 0.0f;
+      setDriverEnabled(false);
+      return;
+    }
+  }
+
+  float speedChange = ACCELERATION_DPS2 * elapsedSeconds;
+  if (currentSpeedDps < desiredSpeedDps) {
+    currentSpeedDps = min(desiredSpeedDps, currentSpeedDps + speedChange);
+  } else {
+    currentSpeedDps = max(desiredSpeedDps, currentSpeedDps - speedChange);
+  }
+  float steppingSpeedDps = max(currentSpeedDps, MINIMUM_MOTION_SPEED_DPS);
+  float stepIntervalUs = 1000000.0f * 360.0f / (steppingSpeedDps * STEPS_PER_REVOLUTION);
   if ((unsigned long)(now - lastStepUs) < (unsigned long)stepIntervalUs) return;
   lastStepUs = now;
 
@@ -119,12 +149,6 @@ void updateMotor()
     return;
   }
 
-  float difference = shortestDifference(targetDeg, angleDeg);
-  if (abs(difference) <= (180.0f / STEPS_PER_REVOLUTION)) {
-    mode = STOPPED;
-    setDriverEnabled(false);
-    return;
-  }
   stepMotor(difference > 0.0f);
 }
 
@@ -148,6 +172,8 @@ void publishStatus()
   Serial.print(targetDeg, 3);
   Serial.print(",\"speed_dps\":");
   Serial.print(speedDps, 3);
+  Serial.print(",\"current_speed_dps\":");
+  Serial.print(currentSpeedDps, 3);
   Serial.print(",\"moving\":");
   Serial.print(mode == STOPPED ? "false" : "true");
   Serial.print(",\"driver_enabled\":");
@@ -169,6 +195,7 @@ void setup()
   digitalWrite(DIR_PIN, LOW);
   Serial.begin(115200);
   lastCommandMs = millis();
+  lastMotionUpdateUs = micros();
   inputLine.reserve(160);
 }
 

@@ -1,0 +1,26 @@
+[Unit]
+Description=AID ROS 2 Bringup (camera, RF detection, and motor control)
+After=network-online.target zenoh-bridge.service
+Wants=network-online.target zenoh-bridge.service
+
+[Service]
+Type=simple
+User=dti-242
+Group=dti-242
+SupplementaryGroups=dialout i2c plugdev video gpio
+WorkingDirectory=/home/dti-242/aid-drone-detection/ros2_ws
+Environment=HOME=/home/dti-242
+Environment=ROS_DOMAIN_ID=0
+Environment=ROS_LOCALHOST_ONLY=1
+Environment=ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+ExecStart=/home/dti-242/aid-drone-detection/scripts/run_aid_bringup.sh
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

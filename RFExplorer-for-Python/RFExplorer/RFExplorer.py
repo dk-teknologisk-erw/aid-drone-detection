@@ -1813,7 +1813,7 @@ class RFECommunicator(object):
         """
         return self.m_FileAmplitudeCalibration.GetAmplitudeCalibration(nMHz)
 
-    def UpdateCalculatorMode(eCurrentCalculator,bForce):
+    def UpdateCalculatorMode(self, eCurrentCalculator, bForce):
         """Set Calculator mode when it is received in a new device configuration or
         changing calculator mode only
         <parameters: 
@@ -1825,15 +1825,15 @@ class RFECommunicator(object):
         #Send replay from device when calculator is changed by software 
         self.m_eCalculator = eCurrentCalculator #Always update Calculator mode
 
-        if (bForce and (m_eActiveModel == RFE_Common.eModel.MODEL_WSUB3G or self.IsMainboardAnalyzerPlus)):
-            if (m_bUseMaxHold):
+        if (bForce and (self.m_eActiveModel == RFE_Common.eModel.MODEL_WSUB3G or self.IsMainboardAnalyzerPlus)):
+            if (self.m_bUseMaxHold):
                 if (self.m_eCalculator != RFE_Common.eCalculator.MAX_HOLD):
                     print("Updated remote mode to Max Hold for reliable DSP calculations with fast signals")
                     time.sleep(0.5)
                     self.SendCommand_SetMaxHold()
             else:
                 if (self.m_eCalculator == RFE_Common.eCalculator.MAX_HOLD):
-                    ReportLog("Remote mode is not Max Hold, some fast signals may not be detected")
+                    print("Remote mode is not Max Hold, some fast signals may not be detected")
                     time.sleep(0.5)
                     self.SendCommand_Realtime()
 #endregion
