@@ -44,3 +44,32 @@ ARDUINO="$HOME/.local/bin/arduino-cli"
 
 ./mcu/flash_pico.sh --build-only sketch_aid_sweep_180
 ```
+
+## Combined ROS 2 bringup service
+
+Build the workspace and install the system service:
+
+```bash
+cd ~/aid-drone-detection/ros2_ws
+source /opt/ros/jazzy/setup.bash
+./build.sh
+cd ..
+sudo ./scripts/install_aid_bringup_service.sh
+```
+
+The installer does not start or enable the service. Manage it explicitly:
+
+```bash
+sudo systemctl start aid-ros2-bringup
+sudo systemctl stop aid-ros2-bringup
+sudo systemctl restart aid-ros2-bringup
+sudo systemctl status aid-ros2-bringup
+sudo journalctl -fu aid-ros2-bringup
+```
+
+Enable or disable automatic startup:
+
+```bash
+sudo systemctl enable aid-ros2-bringup
+sudo systemctl disable aid-ros2-bringup
+```
