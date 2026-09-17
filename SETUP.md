@@ -6,7 +6,7 @@ Run from the repository root on a fresh Ubuntu installation.
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-serial python3-smbus python3-tk i2c-tools curl
+sudo apt install -y python3 python3-serial python3-smbus python3-tk python3-pil python3-pil.imagetk i2c-tools curl
 
 grep -qxF 'dtparam=i2c_arm=on' /boot/firmware/config.txt || \
   echo 'dtparam=i2c_arm=on' | sudo tee -a /boot/firmware/config.txt

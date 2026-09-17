@@ -1,12 +1,17 @@
-aid_camera_server:
+# Wildcard: must match the node's fully-qualified name incl. the /aid_camera namespace.
+/**:
   ros__parameters:
     serial_number: ""
     frame_id: aid_camera_optical_frame
     camera_info_url: ""
-    frame_rate_hz: 1.0
-    exposure_auto: true
-    exposure_time_us: 3000.0
+    frame_rate_hz: 4.0
+    # Fixed short exposure: avoids motion blur on the rotating tower; auto-gain compensates.
+    exposure_auto: false
+    exposure_time_us: 5000.0
     gain_auto: true
     gain_db: 0.0
     grab_timeout_ms: 2000
     reconnect_delay_ms: 1000
+    # High-quality JPEG for CV consumers on the remote side (note leading dot).
+    ".image_raw.compressed.format": jpeg
+    ".image_raw.compressed.jpeg_quality": 95

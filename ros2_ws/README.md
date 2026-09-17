@@ -15,9 +15,12 @@ and management commands are documented in `../SETUP.md`.
 Run the host GUI after building the same workspace on the host:
 
 ```bash
+sudo apt install python3-tk python3-pil python3-pil.imagetk
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ros2 launch aid_system host_gui.launch.py
 ```
+
+Click **Preview** to open the on-demand compressed camera stream.
 
 See `../STATUS.md` for MCU flashing, Zenoh commands, topics, and current status.

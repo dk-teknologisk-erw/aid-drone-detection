@@ -8,7 +8,7 @@
 - `rf_sweep`: reconnecting RF Explorer publisher with 2.4 GHz, 5.8 GHz, and custom center/span selection.
 - `detector`: persistent per-frequency-bin baselines and best candidates kept separately for 2.4 and 5.8 GHz, with one normalized best candidate across both bands.
 - `system_control`: calibrate/explore/focus/stop state handling. Dual calibration/explore scans one revolution per band, stops for at least five seconds while switching, then repeats. Focus Best switches to the winning candidate's band before pointing.
-- `operator_gui`: host Tk GUI for modes, speed, Dual/2.4/5.8/custom RF selection, scan phase/status, candidate focus, and manual orientation focus without a candidate.
+- `operator_gui`: host Tk GUI for modes, speed, Dual/2.4/5.8/custom RF selection, scan phase/status, candidate focus, manual orientation focus, and an on-demand compressed camera Preview window.
 - `aid_motor_controller.ino`: Pico firmware with 30 degrees/s2 acceleration/deceleration, adjustable speed, target motion, stop/zero, 10 Hz JSON telemetry, and active-low A4988 enable on GPIO 2. Coil power is disabled while stopped; a 1.5-second command watchdog stops motion after bridge/USB loss.
 - `aid_bringup`: combines the camera launch and all Pi-side AID nodes under one launch. `aid-ros2-bringup.service` provides root-managed start/stop/enable with graceful ROS shutdown.
 
@@ -55,6 +55,8 @@ source ros2_ws/install/setup.bash
 ros2 launch aid_system host_gui.launch.py
 ```
 
+Install `python3-pil` and `python3-pil.imagetk` on the host for Preview. The Preview button opens a fixed 480 x 270 window and subscribes to `/aid_camera/image_raw/compressed` only while open.
+
 Use the same `ROS_DOMAIN_ID` on both systems. Select an RF range, run Calibration with no drone present, then switch to Explore. Focus best becomes available only for a viable outlier.
 
 In Dual mode at 30 degrees/s, each revolution takes about 12 seconds. A repeating 2.4 + switch + 5.8 + switch cycle takes about 34 seconds. Measured full-sweep times are about 0.40 seconds at 2.4 GHz and 0.26 seconds at 5.8 GHz.
@@ -77,6 +79,6 @@ In Dual mode at 30 degrees/s, each revolution takes about 12 seconds. A repeatin
 - Direct serial test commanded 91.5 degrees in 3 seconds at 30 degrees/s, then stopped. Explore and manual Focus also pass through ROS control.
 - Smooth-motion test commanded exactly 180 degrees through ROS in 7.0 seconds: firmware ramped from about 2 to 30 degrees/s, decelerated into the target with zero reported step error, then disabled the A4988.
 - RF dual-band standalone acquisition was previously verified. The RF Explorer was not visible during final ROS hardware testing, so reconnect/reconfiguration still needs a live end-to-end check.
-- The GUI is syntax/build tested but not displayed here because this Pi currently lacks Tk/display access; install `python3-tk` on the host.
+- The GUI is syntax/build tested but not displayed here because this Pi currently lacks Tk/display access. Live compressed-frame receipt and JPEG decoding to the preview bounds pass.
 - Motor angle is open-loop and resets to zero at MCU boot; physical zeroing or a home sensor is still needed for repeatable mechanical coordinates.
 - RF outliers are candidates, not DJI identification; shared-band Wi-Fi remains a source of false positives.
