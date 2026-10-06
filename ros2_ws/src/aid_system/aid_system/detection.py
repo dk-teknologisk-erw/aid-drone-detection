@@ -58,6 +58,7 @@ class BaselineModel:
         minimum_z_score: float,
         std_floor_db: float,
         excluded_ranges_mhz: list[tuple[float, float]] | None = None,
+        target_frequency_mhz: float | None = None,
     ) -> dict:
         key = configuration_key(sweep)
         stats = self.configurations.get(key)
@@ -83,7 +84,17 @@ class BaselineModel:
         ]
         if not allowed:
             return {"viable": False, "reason": "all_bins_excluded"}
-        index = max(allowed, key=scores.__getitem__)
+        if target_frequency_mhz is None:
+            index = max(allowed, key=scores.__getitem__)
+        else:
+            index = min(
+                allowed,
+                key=lambda candidate: abs(
+                    float(sweep["start_mhz"])
+                    + candidate * float(sweep["step_mhz"])
+                    - target_frequency_mhz
+                ),
+            )
         delta_db = observed[index] - expected[index]
         return {
             "viable": scores[index] >= minimum_z_score and delta_db >= minimum_delta_db,

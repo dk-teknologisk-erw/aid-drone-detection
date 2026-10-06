@@ -3,7 +3,7 @@ from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Empty, Float32, String
 
 from .detection import BaselineModel
 from .ros_utils import run_node
@@ -17,7 +17,16 @@ class DetectorNode(Node):
         self.declare_parameter("minimum_delta_db", 6.0)
         self.declare_parameter("minimum_z_score", 4.0)
         self.declare_parameter("std_floor_db", 1.5)
+        self.declare_parameter("excluded_ranges_mhz", [2402.0, 2422.0])
         self.baseline_path = Path(str(self.get_parameter("baseline_path").value))
+        excluded_values = [
+            float(value) for value in self.get_parameter("excluded_ranges_mhz").value
+        ]
+        if len(excluded_values) % 2:
+            raise ValueError("excluded_ranges_mhz must contain low/high pairs")
+        self.excluded_ranges_mhz = list(
+            zip(excluded_values[::2], excluded_values[1::2])
+        )
         self.baseline = BaselineModel()
         try:
             loaded = self.baseline.load(self.baseline_path)
@@ -27,17 +36,25 @@ class DetectorNode(Node):
         self.mode = "idle"
         self.motor_angle = 0.0
         self.relative_heading = 0.0
+        self.target_frequency_mhz: float | None = None
         self.best_candidate: dict | None = None
         self.best_candidates: dict[str, dict] = {}
         self.detection_publisher = self.create_publisher(String, "/aid/detection", 20)
         self.status_publisher = self.create_publisher(String, "/aid/detector/status", 10)
         self.create_subscription(String, "/aid/detector/mode", self.mode_callback, 10)
+        self.create_subscription(
+            Float32,
+            "/aid/detector/target_mhz",
+            self.target_frequency_callback,
+            10,
+        )
+        self.create_subscription(Empty, "/aid/detector/reset", self.reset_callback, 10)
         self.create_subscription(String, "/aid/rf/sweep", self.sweep_callback, 10)
         self.create_subscription(Float32, "/aid/motor/angle_deg", self.angle_callback, 20)
         self.create_subscription(Float32, "/aid/compass/relative_heading_deg", self.heading_callback, 20)
 
     def mode_callback(self, message: String) -> None:
-        if message.data not in {"idle", "calibrate", "explore", "focus"}:
+        if message.data not in {"idle", "calibrate", "explore", "focus", "tracking"}:
             return
         if self.mode == "calibrate" and message.data != "calibrate":
             try:
@@ -50,6 +67,13 @@ class DetectorNode(Node):
         self.best_candidate = None
         self.best_candidates.clear()
         self.status_publisher.publish(String(data=json.dumps({"mode": self.mode})))
+
+    def target_frequency_callback(self, message: Float32) -> None:
+        self.target_frequency_mhz = float(message.data)
+
+    def reset_callback(self, _message: Empty) -> None:
+        self.best_candidate = None
+        self.best_candidates.clear()
 
     def angle_callback(self, message: Float32) -> None:
         self.motor_angle = float(message.data) % 360.0
@@ -65,6 +89,8 @@ class DetectorNode(Node):
             if self.mode == "calibrate":
                 count = self.baseline.update(sweep)
                 result = {"viable": False, "reason": "calibrating", "baseline_samples": count}
+            elif self.mode == "tracking" and self.target_frequency_mhz is None:
+                result = {"viable": False, "reason": "no_tracking_target"}
             else:
                 result = self.baseline.analyze(
                     sweep,
@@ -72,6 +98,8 @@ class DetectorNode(Node):
                     float(self.get_parameter("minimum_delta_db").value),
                     float(self.get_parameter("minimum_z_score").value),
                     float(self.get_parameter("std_floor_db").value),
+                    self.excluded_ranges_mhz,
+                    self.target_frequency_mhz if self.mode == "tracking" else None,
                 )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             self.get_logger().warning(f"Invalid RF sweep: {error}")
@@ -86,7 +114,7 @@ class DetectorNode(Node):
             "relative_bearing_deg": round((self.motor_angle + self.relative_heading) % 360.0, 3),
             **result,
         }
-        if candidate.get("viable"):
+        if candidate.get("viable") and self.mode == "explore":
             band = str(candidate["band"])
             current_band_best = self.best_candidates.get(band)
             if current_band_best is None or float(candidate["z_score"]) > float(current_band_best["z_score"]):

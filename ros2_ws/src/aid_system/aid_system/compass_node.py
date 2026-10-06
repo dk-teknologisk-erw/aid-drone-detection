@@ -59,6 +59,9 @@ class CompassNode(Node):
         self.reference_heading: float | None = None
         self.latest_heading: float | None = None
         self.heading_publisher = self.create_publisher(Float32, "/aid/compass/relative_heading_deg", 20)
+        self.absolute_heading_publisher = self.create_publisher(
+            Float32, "/aid/compass/heading_deg", 20
+        )
         self.status_publisher = self.create_publisher(String, "/aid/compass/status", 20)
         self.create_subscription(Empty, "/aid/compass/zero", self.zero_callback, 10)
         self.create_timer(1.0 / float(self.get_parameter("publish_hz").value), self.sample)
@@ -83,10 +86,12 @@ class CompassNode(Node):
             self.reference_heading = self.latest_heading
         relative = normalize_signed(self.latest_heading - self.reference_heading)
         self.heading_publisher.publish(Float32(data=relative))
+        self.absolute_heading_publisher.publish(Float32(data=self.latest_heading))
         status = {
             "schema": "aid.compass.v1",
             "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "relative_heading_deg": round(relative, 3),
+            "heading_deg": round(self.latest_heading, 3),
             "magnetic_ut": {"x": round(x_ut, 3), "y": round(y_ut, 3), "z": round(z_ut, 3)},
         }
         self.status_publisher.publish(String(data=json.dumps(status, separators=(",", ":"))))

@@ -62,6 +62,10 @@ Install `python3-pil` and `python3-pil.imagetk` on the host for Preview. The Pre
 
 Use the same `ROS_DOMAIN_ID` on both systems. Select an RF range, run Calibration with no drone present, then switch to Explore. Focus best becomes available only for a viable outlier.
 
+Focus best consumes the current maximum and turns to it. Accept and Decline become available after the motor arrives. Accept enters Tracking and publishes the accepted frequency and live camera yaw. Decline clears the selection and resumes Explore. Discard candidate clears detected, focused, and accepted targets, exits Tracking, and stops the tower.
+
+Tracking starts in Hold. Oscillate samples the accepted frequency at 3 degrees clockwise and counterclockwise, then shifts the center by 1 degree toward the stronger side when the difference exceeds 1 dB. The press-and-hold Clockwise and Counterclockwise controls override either automatic behavior. After three seconds without a viable target-frequency measurement, automatic motion stops and Target lost remains latched until Tracking is restarted.
+
 In Dual mode at 30 degrees/s, each revolution takes about 12 seconds. A repeating 2.4 + switch + 5.8 + switch cycle takes about 34 seconds. Measured full-sweep times are about 0.40 seconds at 2.4 GHz and 0.26 seconds at 5.8 GHz.
 
 ## ROS topics
@@ -71,10 +75,13 @@ In Dual mode at 30 degrees/s, each revolution takes about 12 seconds. A repeatin
 - RF: `/aid/rf/config`, `/aid/rf/sweep`, `/aid/rf/status`
 - Compass: `/aid/compass/relative_heading_deg`, `/aid/compass/status`, `/aid/compass/zero`
 - Detection: `/aid/detector/mode`, `/aid/detection`, `/aid/detector/status`
+- Accepted target frequency: `/aid/detection/freq` (`std_msgs/Float32`, MHz)
+- Accepted target relative yaw: `/aid/detection/yaw_rel` (`std_msgs/Float32`, degrees clockwise from motor zero)
+- Accepted target NED yaw: `/aid/detection/yaw_ned` (`std_msgs/Float32`, magnetic degrees clockwise from north)
 
 ## Validation and remaining checks
 
-- Clean Jazzy build passes; combined bringup launch parsing and live camera/system startup pass. All 7 focused `aid_system` tests pass.
+- Clean Jazzy build passes; combined bringup launch parsing and live camera/system startup pass. The focused `aid_system` test suite passes.
 - A bounded full Pi launch starts and stops all five nodes cleanly while the RF node retries an absent device.
 - Detector behavior test rejects baseline noise and detects a known 25 dB broadband outlier.
 - ROS control test maps Explore to the MCU explore command.
@@ -85,3 +92,4 @@ In Dual mode at 30 degrees/s, each revolution takes about 12 seconds. A repeatin
 - The GUI is syntax/build tested but not displayed here because this Pi currently lacks Tk/display access. Live compressed-frame receipt and JPEG decoding to the preview bounds pass.
 - Motor angle is open-loop and resets to zero at MCU boot; physical zeroing or a home sensor is still needed for repeatable mechanical coordinates.
 - RF outliers are candidates, not DJI identification; shared-band Wi-Fi remains a source of false positives.
+- NED yaw currently uses the camera-aligned raw magnetic compass heading. Hard-iron/soft-iron calibration and magnetic declination correction are still required for accurate true-north yaw.

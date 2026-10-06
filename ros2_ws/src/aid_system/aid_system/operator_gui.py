@@ -14,8 +14,8 @@ from .camera_preview import decode_preview
 
 
 PREVIEW_SIZE = (480, 270)
-BASE_WINDOW_SIZE = (760, 560)
-PREVIEW_WINDOW_SIZE = (760, 880)
+BASE_WINDOW_SIZE = (800, 700)
+PREVIEW_WINDOW_SIZE = (800, 1020)
 
 
 class OperatorGui(Node):
@@ -41,6 +41,7 @@ class OperatorGui(Node):
         self.speed = tk.DoubleVar(value=30.0)
         self.manual_target = tk.StringVar(value="0")
         self.rf_selection = tk.StringVar(value="2.4")
+        self.tracking_behavior = tk.StringVar(value="hold")
         self.center = tk.StringVar(value="5745")
         self.span = tk.StringVar(value="20")
         self.focus_available = False
@@ -61,13 +62,85 @@ class OperatorGui(Node):
 
         mode_frame = ttk.LabelFrame(root, text="Operation", padding=10)
         mode_frame.pack(fill="x")
-        for label, mode in (("Calibrate", "calibrate"), ("Explore", "explore"), ("Stop", "idle")):
+        for label, mode in (("Calibrate", "calibrate"), ("Explore", "explore")):
             ttk.Button(mode_frame, text=label, command=lambda selected=mode: self.send(command="mode", mode=selected)).pack(side="left", padx=4)
-        self.focus_button = ttk.Button(mode_frame, text="Focus best", command=lambda: self.send(command="focus"), state="disabled")
-        self.focus_button.pack(side="left", padx=4)
-        self.preview_button = ttk.Button(mode_frame, text="Preview", command=self.toggle_preview)
-        self.preview_button.pack(side="left", padx=4)
+        self.tracking_mode_button = ttk.Button(
+            mode_frame,
+            text="Tracking",
+            command=lambda: self.send(command="mode", mode="tracking"),
+            state="disabled",
+        )
+        self.tracking_mode_button.pack(side="left", padx=4)
+        ttk.Button(
+            mode_frame,
+            text="Stop",
+            command=lambda: self.send(command="mode", mode="idle"),
+        ).pack(side="left", padx=4)
         ttk.Label(mode_frame, textvariable=self.mode_text).pack(side="right")
+
+        candidate_frame = ttk.LabelFrame(root, text="Candidate", padding=10)
+        candidate_frame.pack(fill="x", pady=(10, 0))
+        self.focus_button = ttk.Button(
+            candidate_frame,
+            text="Focus best",
+            command=lambda: self.send(command="focus"),
+            state="disabled",
+        )
+        self.focus_button.pack(side="left", padx=4)
+        self.accept_button = ttk.Button(
+            candidate_frame,
+            text="Accept",
+            command=lambda: self.send(command="accept"),
+            state="disabled",
+        )
+        self.accept_button.pack(side="left", padx=4)
+        self.decline_button = ttk.Button(
+            candidate_frame,
+            text="Decline",
+            command=lambda: self.send(command="decline"),
+            state="disabled",
+        )
+        self.decline_button.pack(side="left", padx=4)
+        self.discard_button = ttk.Button(
+            candidate_frame,
+            text="Discard candidate",
+            command=lambda: self.send(command="discard"),
+            state="disabled",
+        )
+        self.discard_button.pack(side="left", padx=4)
+        self.preview_button = ttk.Button(candidate_frame, text="Preview", command=self.toggle_preview)
+        self.preview_button.pack(side="right", padx=4)
+
+        tracking_frame = ttk.LabelFrame(root, text="Tracking motion", padding=10)
+        tracking_frame.pack(fill="x", pady=(10, 0))
+        self.hold_button = ttk.Radiobutton(
+            tracking_frame,
+            text="Hold",
+            variable=self.tracking_behavior,
+            value="hold",
+            command=self.apply_tracking_behavior,
+            state="disabled",
+        )
+        self.hold_button.pack(side="left", padx=4)
+        self.oscillate_button = ttk.Radiobutton(
+            tracking_frame,
+            text="Oscillate",
+            variable=self.tracking_behavior,
+            value="oscillate",
+            command=self.apply_tracking_behavior,
+            state="disabled",
+        )
+        self.oscillate_button.pack(side="left", padx=4)
+        self.counterclockwise_button = ttk.Button(
+            tracking_frame, text="Counterclockwise", state="disabled"
+        )
+        self.counterclockwise_button.pack(side="right", padx=4)
+        self.clockwise_button = ttk.Button(
+            tracking_frame, text="Clockwise", state="disabled"
+        )
+        self.clockwise_button.pack(side="right", padx=4)
+        self.bind_manual_button(self.counterclockwise_button, "counterclockwise")
+        self.bind_manual_button(self.clockwise_button, "clockwise")
 
         motor_frame = ttk.LabelFrame(root, text="Rotation speed", padding=10)
         motor_frame.pack(fill="x", pady=(10, 0))
@@ -125,6 +198,23 @@ class OperatorGui(Node):
     def apply_speed(self) -> None:
         self.send(command="speed", speed_dps=self.speed.get())
 
+    def apply_tracking_behavior(self) -> None:
+        self.send(
+            command="tracking_behavior", behavior=self.tracking_behavior.get()
+        )
+
+    def bind_manual_button(self, button: ttk.Button, direction: str) -> None:
+        button.bind(
+            "<ButtonPress-1>",
+            lambda _event: self.send(
+                command="manual", action="start", direction=direction
+            ),
+        )
+        button.bind(
+            "<ButtonRelease-1>",
+            lambda _event: self.send(command="manual", action="stop"),
+        )
+
     def apply_manual_target(self) -> None:
         try:
             target = float(self.manual_target.get())
@@ -148,7 +238,42 @@ class OperatorGui(Node):
         suffix = f" | {phase} {band}" if phase else ""
         if remaining > 0.0:
             suffix += f" | resume in {remaining:.1f}s"
+        if data.get("target_lost"):
+            suffix += " | Target lost"
+        if data.get("error"):
+            suffix += f" | {data['error']}"
         self.mode_text.set(f"Mode: {data.get('mode', 'unknown')}{suffix}")
+        focus_available = bool(data.get("focus_available"))
+        candidate_selected = bool(data.get("candidate_selected"))
+        confirmation_available = bool(data.get("confirmation_available"))
+        tracking_available = bool(data.get("tracking_available"))
+        tracking_active = data.get("mode") == "tracking"
+        self.focus_button.configure(state="normal" if focus_available else "disabled")
+        self.accept_button.configure(
+            state="normal" if confirmation_available else "disabled"
+        )
+        self.decline_button.configure(
+            state="normal" if confirmation_available else "disabled"
+        )
+        self.discard_button.configure(
+            state="normal"
+            if focus_available or candidate_selected or tracking_available
+            else "disabled"
+        )
+        self.tracking_mode_button.configure(
+            state="normal" if tracking_available else "disabled"
+        )
+        tracking_state = "normal" if tracking_active else "disabled"
+        for control in (
+            self.hold_button,
+            self.oscillate_button,
+            self.counterclockwise_button,
+            self.clockwise_button,
+        ):
+            control.configure(state=tracking_state)
+        behavior = data.get("tracking_behavior")
+        if behavior in {"hold", "oscillate"}:
+            self.tracking_behavior.set(str(behavior))
 
     def motor_callback(self, message: String) -> None:
         data = self.decode(message)
@@ -176,9 +301,15 @@ class OperatorGui(Node):
 
     def detection_callback(self, message: String) -> None:
         data = self.decode(message)
+        if data.get("mode") == "tracking":
+            self.candidate_text.set(
+                f"Tracked signal: {float(data.get('frequency_mhz', 0)):.3f} MHz | "
+                f"delta {float(data.get('delta_db', 0)):.1f} dB | "
+                f"z {float(data.get('z_score', 0)):.1f}"
+            )
+            return
         best = data.get("best_candidate")
         self.focus_available = bool(best and best.get("viable"))
-        self.focus_button.configure(state="normal" if self.focus_available else "disabled")
         if best:
             self.candidate_text.set(
                 f"Best candidate: {float(best['frequency_mhz']):.3f} MHz | "
