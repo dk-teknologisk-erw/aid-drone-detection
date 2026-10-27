@@ -1,5 +1,7 @@
+from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import math
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -8,39 +10,58 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
-from std_msgs.msg import String
+from std_msgs.msg import Float32, String
+import zmq
 
 from .camera_preview import decode_preview
+from .orientation_sender import orientation_endpoint, send_orientation
 
 
 PREVIEW_SIZE = (480, 270)
-BASE_WINDOW_SIZE = (800, 700)
-PREVIEW_WINDOW_SIZE = (800, 1020)
+BASE_WINDOW_SIZE = (800, 840)
+PREVIEW_WINDOW_SIZE = (800, 1160)
 
 
 class OperatorGui(Node):
     def __init__(self) -> None:
         super().__init__("aid_operator_gui")
         self.control_publisher = self.create_publisher(String, "/aid/control", 10)
+        self.frequency_publisher = self.create_publisher(Float32, "/aid/detection/freq", 10)
         self.create_subscription(String, "/aid/system/status", self.system_callback, 10)
         self.create_subscription(String, "/aid/motor/status", self.motor_callback, 20)
         self.create_subscription(String, "/aid/rf/status", self.rf_callback, 10)
         self.create_subscription(String, "/aid/detection", self.detection_callback, 20)
+        self.create_subscription(String, "/aid/detector/status", self.detector_callback, 10)
         self.create_subscription(String, "/aid/compass/status", self.compass_callback, 10)
         self.declare_parameter("camera_topic", "/aid_camera/image_raw/compressed")
 
         self.root = tk.Tk()
         self.root.title("AID Direction Finder")
         self.root.geometry(f"{BASE_WINDOW_SIZE[0]}x{BASE_WINDOW_SIZE[1]}")
+        self.root.minsize(BASE_WINDOW_SIZE[0], 480)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.mode_text = tk.StringVar(value="Mode: unknown")
         self.motor_text = tk.StringVar(value="Motor: waiting")
         self.rf_text = tk.StringVar(value="RF: waiting")
         self.compass_text = tk.StringVar(value="Heading: waiting")
         self.candidate_text = tk.StringVar(value="No candidate")
+        self.maximum_text = tk.StringVar(value="Live maximum: waiting for RF sweep")
+        self.frequency_status = tk.StringVar(value="Not sent")
+        self.target_text = tk.StringVar(value="No focused or confirmed target")
+        self.maximum_frequency: float | None = None
+        self.maximum_received_at = 0.0
+        self.maximum_label = ""
+        self.detection_method = tk.StringVar(value="no_baseline")
+        self.compass_heading: float | None = None
+        self.orientation_ip = tk.StringVar()
+        self.orientation_port = tk.StringVar()
+        self.orientation_status = tk.StringVar(value="Not sent")
+        self.orientation_executor = ThreadPoolExecutor(max_workers=1)
+        self.orientation_future: Future[None] | None = None
+        self.orientation_after_id: str | None = None
         self.speed = tk.DoubleVar(value=30.0)
         self.manual_target = tk.StringVar(value="0")
-        self.rf_selection = tk.StringVar(value="2.4")
+        self.rf_selection = tk.StringVar(value="5.8")
         self.tracking_behavior = tk.StringVar(value="hold")
         self.center = tk.StringVar(value="5745")
         self.span = tk.StringVar(value="20")
@@ -55,10 +76,28 @@ class OperatorGui(Node):
         self.displayed_frame_number = 0
         self.preview_photo = None
         self.build_ui()
+        self.create_timer(0.5, self.refresh_frequency)
 
     def build_ui(self) -> None:
-        root = ttk.Frame(self.root, padding=14)
-        root.pack(fill="both", expand=True)
+        self.content_canvas = tk.Canvas(self.root, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(
+            self.root, orient="vertical", command=self.content_canvas.yview
+        )
+        self.content_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.content_canvas.pack(side="left", fill="both", expand=True)
+        root = ttk.Frame(self.content_canvas, padding=14)
+        content_window = self.content_canvas.create_window((0, 0), window=root, anchor="nw")
+        root.bind(
+            "<Configure>",
+            lambda _event: self.content_canvas.configure(
+                scrollregion=self.content_canvas.bbox("all")
+            ),
+        )
+        self.content_canvas.bind(
+            "<Configure>",
+            lambda event: self.content_canvas.itemconfigure(content_window, width=event.width),
+        )
 
         mode_frame = ttk.LabelFrame(root, text="Operation", padding=10)
         mode_frame.pack(fill="x")
@@ -78,6 +117,17 @@ class OperatorGui(Node):
         ).pack(side="left", padx=4)
         ttk.Label(mode_frame, textvariable=self.mode_text).pack(side="right")
 
+        maximum_frame = ttk.LabelFrame(root, text="RF maximum (current sweep)", padding=10)
+        maximum_frame.pack(fill="x", pady=(10, 0))
+        ttk.Label(maximum_frame, textvariable=self.maximum_text).pack(anchor="w")
+        self.frequency_send_button = ttk.Button(
+            maximum_frame, text="Send Freq ROS2", command=self.send_frequency,
+            state="disabled",
+        )
+        self.frequency_send_button.pack(anchor="w", pady=4)
+        ttk.Label(maximum_frame, textvariable=self.frequency_status).pack(anchor="w")
+        ttk.Label(maximum_frame, textvariable=self.target_text).pack(anchor="w")
+
         candidate_frame = ttk.LabelFrame(root, text="Candidate", padding=10)
         candidate_frame.pack(fill="x", pady=(10, 0))
         self.focus_button = ttk.Button(
@@ -89,18 +139,11 @@ class OperatorGui(Node):
         self.focus_button.pack(side="left", padx=4)
         self.accept_button = ttk.Button(
             candidate_frame,
-            text="Accept",
+            text="Confirm",
             command=lambda: self.send(command="accept"),
             state="disabled",
         )
         self.accept_button.pack(side="left", padx=4)
-        self.decline_button = ttk.Button(
-            candidate_frame,
-            text="Decline",
-            command=lambda: self.send(command="decline"),
-            state="disabled",
-        )
-        self.decline_button.pack(side="left", padx=4)
         self.discard_button = ttk.Button(
             candidate_frame,
             text="Discard candidate",
@@ -175,6 +218,43 @@ class OperatorGui(Node):
         ttk.Entry(rf_frame, textvariable=self.span, width=6).pack(side="left")
         ttk.Button(rf_frame, text="Apply", command=self.apply_rf).pack(side="right")
 
+        detector_frame = ttk.LabelFrame(root, text="Detection method", padding=10)
+        detector_frame.pack(fill="x", pady=(10, 0))
+        for label, value in (
+            ("No baseline (live SNR)", "no_baseline"),
+            ("Saved baseline", "baseline"),
+        ):
+            ttk.Radiobutton(
+                detector_frame, text=label, variable=self.detection_method, value=value,
+                command=lambda: self.send(
+                    command="detection_method", method=self.detection_method.get()
+                ),
+            ).pack(side="left", padx=4)
+
+        orientation_frame = ttk.LabelFrame(root, text="Compass destination", padding=10)
+        orientation_frame.pack(fill="x", pady=(10, 0))
+        orientation_frame.columnconfigure(1, weight=1)
+        ttk.Label(orientation_frame, text="IP address").grid(row=0, column=0, sticky="w")
+        ttk.Entry(orientation_frame, textvariable=self.orientation_ip, width=24).grid(
+            row=0, column=1, sticky="ew", padx=(8, 14)
+        )
+        ttk.Label(orientation_frame, text="Port").grid(row=0, column=2)
+        ttk.Entry(orientation_frame, textvariable=self.orientation_port, width=7).grid(
+            row=0, column=3, padx=8
+        )
+        self.orientation_send_button = ttk.Button(
+            orientation_frame,
+            text="Send orientation",
+            command=self.send_compass_orientation,
+            state="disabled",
+        )
+        self.orientation_send_button.grid(row=0, column=4)
+        ttk.Label(
+            orientation_frame, textvariable=self.orientation_status, wraplength=700
+        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(8, 0))
+        self.orientation_ip.trace_add("write", self.update_orientation_send_button)
+        self.orientation_port.trace_add("write", self.update_orientation_send_button)
+
         status_frame = ttk.LabelFrame(root, text="Live status", padding=10)
         status_frame.pack(fill="both", expand=True, pady=(10, 0))
         self.status_frame = status_frame
@@ -230,6 +310,85 @@ class OperatorGui(Node):
         except ValueError:
             self.rf_text.set("RF: center and span must be numbers")
 
+    def refresh_frequency(self) -> None:
+        fresh = (
+            self.maximum_frequency is not None
+            and time.monotonic() - self.maximum_received_at < 3.0
+        )
+        self.frequency_send_button.configure(state="normal" if fresh else "disabled")
+        if self.maximum_label:
+            self.maximum_text.set(self.maximum_label + ("" if fresh else " | STALE"))
+
+    def send_frequency(self) -> None:
+        if (
+            self.maximum_frequency is None
+            or time.monotonic() - self.maximum_received_at >= 3.0
+        ):
+            self.frequency_status.set("Not sent: waiting for a fresh RF maximum")
+            return
+        frequency = self.maximum_frequency
+        self.frequency_publisher.publish(Float32(data=frequency))
+        subscribers = self.frequency_publisher.get_subscription_count()
+        self.frequency_status.set(
+            f"Published {frequency:.3f} MHz on /aid/detection/freq (Float32; "
+            f"{subscribers} subscribers)"
+        )
+
+    def detector_callback(self, message: String) -> None:
+        data = self.decode(message)
+        if data.get("method") in {"baseline", "no_baseline"}:
+            self.detection_method.set(data["method"])
+
+    def update_orientation_send_button(self, *_args) -> None:
+        try:
+            orientation_endpoint(self.orientation_ip.get(), self.orientation_port.get())
+            ready = self.compass_heading is not None and self.orientation_future is None
+        except ValueError:
+            ready = False
+        self.orientation_send_button.configure(state="normal" if ready else "disabled")
+
+    def send_compass_orientation(self) -> None:
+        if self.orientation_future is not None:
+            return
+        try:
+            endpoint = orientation_endpoint(
+                self.orientation_ip.get(), self.orientation_port.get()
+            )
+            heading = self.compass_heading
+            if heading is None:
+                raise ValueError("Waiting for compass orientation")
+        except ValueError as error:
+            self.orientation_status.set(str(error))
+            return
+        self.orientation_future = self.orientation_executor.submit(
+            send_orientation, endpoint, heading
+        )
+        self.orientation_status.set(f"Sending {heading:+.1f} deg to {endpoint}")
+        self.update_orientation_send_button()
+        self.orientation_after_id = self.root.after(
+            50, lambda: self.check_orientation_send(endpoint, heading)
+        )
+
+    def check_orientation_send(self, endpoint: str, heading: float) -> None:
+        self.orientation_after_id = None
+        if self.orientation_future is None:
+            return
+        if not self.orientation_future.done():
+            self.orientation_after_id = self.root.after(
+                50, lambda: self.check_orientation_send(endpoint, heading)
+            )
+            return
+        try:
+            self.orientation_future.result()
+        except zmq.Again:
+            self.orientation_status.set("Receiver unavailable: connection timed out")
+        except (zmq.ZMQError, ValueError, OverflowError) as error:
+            self.orientation_status.set(f"Send failed: {error}")
+        else:
+            self.orientation_status.set(f"Queued {heading:+.1f} deg to {endpoint}")
+        self.orientation_future = None
+        self.update_orientation_send_button()
+
     def system_callback(self, message: String) -> None:
         data = self.decode(message)
         phase = data.get("phase", "")
@@ -239,7 +398,13 @@ class OperatorGui(Node):
         if remaining > 0.0:
             suffix += f" | resume in {remaining:.1f}s"
         if data.get("target_lost"):
-            suffix += " | Target lost"
+            suffix += " | Signal lost: holding and listening for recovery"
+        if data.get("mode") == "focus" and data.get("candidate_selected"):
+            suffix += (
+                " | Confirm or discard" if data.get("confirmation_available")
+                else " | Waiting for live signal" if data.get("focus_arrived")
+                else " | Moving to candidate"
+            )
         if data.get("error"):
             suffix += f" | {data['error']}"
         self.mode_text.set(f"Mode: {data.get('mode', 'unknown')}{suffix}")
@@ -250,9 +415,6 @@ class OperatorGui(Node):
         tracking_active = data.get("mode") == "tracking"
         self.focus_button.configure(state="normal" if focus_available else "disabled")
         self.accept_button.configure(
-            state="normal" if confirmation_available else "disabled"
-        )
-        self.decline_button.configure(
             state="normal" if confirmation_available else "disabled"
         )
         self.discard_button.configure(
@@ -274,6 +436,14 @@ class OperatorGui(Node):
         behavior = data.get("tracking_behavior")
         if behavior in {"hold", "oscillate"}:
             self.tracking_behavior.set(str(behavior))
+        selected = data.get("selected_frequency_mhz")
+        tracked = data.get("tracked_frequency_mhz")
+        if selected is not None:
+            self.target_text.set(f"Focused candidate: {float(selected):.3f} MHz")
+        elif tracked is not None:
+            self.target_text.set(f"Confirmed target: {float(tracked):.3f} MHz")
+        else:
+            self.target_text.set("No focused or confirmed target")
 
     def motor_callback(self, message: String) -> None:
         data = self.decode(message)
@@ -288,6 +458,8 @@ class OperatorGui(Node):
     def rf_callback(self, message: String) -> None:
         data = self.decode(message)
         if not data.get("connected", False):
+            self.maximum_received_at = 0.0
+            self.refresh_frequency()
             self.rf_text.set(f"RF: {data.get('state')} ({data.get('error', 'waiting')})")
             return
         self.rf_text.set(
@@ -297,29 +469,54 @@ class OperatorGui(Node):
 
     def compass_callback(self, message: String) -> None:
         data = self.decode(message)
-        self.compass_text.set(f"Relative heading: {float(data.get('relative_heading_deg', 0)):.1f} deg")
+        try:
+            heading = float(data.get("signed_heading_deg", data.get("heading_deg")))
+        except (TypeError, ValueError):
+            heading = None
+        if heading is None or not math.isfinite(heading):
+            self.compass_heading = None
+            self.compass_text.set("Magnetic heading: waiting")
+        else:
+            self.compass_heading = heading
+            self.compass_text.set(f"Magnetic heading: {heading:+.1f} deg")
+        self.update_orientation_send_button()
 
     def detection_callback(self, message: String) -> None:
         data = self.decode(message)
-        if data.get("mode") == "tracking":
-            self.candidate_text.set(
-                f"Tracked signal: {float(data.get('frequency_mhz', 0)):.3f} MHz | "
-                f"delta {float(data.get('delta_db', 0)):.1f} dB | "
-                f"z {float(data.get('z_score', 0)):.1f}"
+        maximum = data.get("live_maximum")
+        try:
+            if maximum is None:
+                raise ValueError("missing live maximum")
+            frequency = float(maximum["frequency_mhz"])
+            amplitude = float(maximum["amplitude_dbm"])
+            if not math.isfinite(frequency) or not math.isfinite(amplitude):
+                raise ValueError("non-finite live maximum")
+        except (KeyError, TypeError, ValueError) as error:
+            self.maximum_received_at = 0.0
+            self.frequency_status.set(f"RF maximum unavailable: {error}")
+        else:
+            self.maximum_frequency = frequency
+            self.maximum_received_at = time.monotonic()
+            self.maximum_label = (
+                f"Live maximum: {frequency:.3f} MHz | {amplitude:.1f} dBm | "
+                f"{data.get('band', '')} (not drone identification)"
             )
-            return
+        self.refresh_frequency()
         best = data.get("best_candidate")
         self.focus_available = bool(best and best.get("viable"))
         if best:
             self.candidate_text.set(
                 f"Best candidate: {float(best['frequency_mhz']):.3f} MHz | "
                 f"antenna {float(best['antenna_angle_deg']):.1f} deg | "
-                f"relative bearing {float(best['relative_bearing_deg']):.1f} deg | "
-                f"delta {float(best['delta_db']):.1f} dB | z {float(best['z_score']):.1f}"
+                f"score {float(best['score']):.1f} | "
+                f"age {float(best['age_seconds']):.1f}s"
             )
         else:
             self.candidate_text.set(
-                f"Detection: {data.get('reason', 'waiting')} | baseline samples {data.get('baseline_samples', 0)}"
+                f"Detection: {data.get('reason', 'waiting')} | "
+                f"{data.get('method', '')} | "
+                f"SNR {float(data.get('snr_db', 0)):.1f} dB | "
+                f"baseline samples {data.get('baseline_samples', 0)}"
             )
 
     def toggle_preview(self) -> None:
@@ -400,6 +597,10 @@ class OperatorGui(Node):
             self.root.after(20, self.spin_once)
 
     def close(self) -> None:
+        if self.orientation_after_id is not None:
+            self.root.after_cancel(self.orientation_after_id)
+            self.orientation_after_id = None
+        self.orientation_executor.shutdown(wait=False, cancel_futures=True)
         self.close_preview()
         self.root.quit()
 

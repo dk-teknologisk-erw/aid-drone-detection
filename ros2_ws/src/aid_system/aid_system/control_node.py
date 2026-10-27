@@ -1,4 +1,5 @@
 import json
+import math
 import time
 
 import rclpy
@@ -16,33 +17,38 @@ class SystemControlNode(Node):
         self.mode = "idle"
         self.speed_dps = 30.0
         self.best_candidate: dict | None = None
+        self.best_candidate_expires_at = 0.0
         self.selected_candidate: dict | None = None
         self.accepted_target: dict | None = None
         self.motor_angle = 0.0
         self.motor_moving = False
         self.absolute_heading: float | None = None
-        self.rf_selection = "2.4"
+        self.rf_selection = "5.8"
         self.rf_ready_band: str | None = None
         self.dual_scheduler = DualBandScheduler(switch_seconds=5.0)
         self.pending_focus: dict | None = None
         self.focus_ready_at = 0.0
         self.focus_commanded = False
         self.focus_arrived = False
+        self.focus_signal_at = 0.0
         self.tracking_behavior = "hold"
         self.manual_direction = 0
         self.manual_next_at = 0.0
         self.last_target_seen_at = 0.0
         self.target_lost = False
+        self.recovery_samples = 0
         self.declare_parameter("tracking_span_deg", 3.0)
         self.declare_parameter("tracking_correction_deg", 1.0)
         self.declare_parameter("tracking_deadband_db", 1.0)
         self.declare_parameter("tracking_sample_seconds", 1.0)
         self.declare_parameter("tracking_signal_timeout_seconds", 3.0)
+        self.declare_parameter("tracking_window_mhz", 10.0)
         self.declare_parameter("manual_step_deg", 3.0)
         self.tracking_signal_timeout = float(
             self.get_parameter("tracking_signal_timeout_seconds").value
         )
         self.manual_step_deg = float(self.get_parameter("manual_step_deg").value)
+        self.tracking_window_mhz = float(self.get_parameter("tracking_window_mhz").value)
         self.tracking_search = TrackingSearch(
             float(self.get_parameter("tracking_span_deg").value),
             float(self.get_parameter("tracking_correction_deg").value),
@@ -53,14 +59,12 @@ class SystemControlNode(Node):
         self.motor_speed_publisher = self.create_publisher(Float32, "/aid/motor/speed_dps", 10)
         self.motor_target_publisher = self.create_publisher(Float32, "/aid/motor/target_deg", 10)
         self.detector_mode_publisher = self.create_publisher(String, "/aid/detector/mode", 10)
+        self.detector_method_publisher = self.create_publisher(String, "/aid/detector/method", 10)
         self.detector_target_publisher = self.create_publisher(
             Float32, "/aid/detector/target_mhz", 10
         )
         self.detector_reset_publisher = self.create_publisher(
             Empty, "/aid/detector/reset", 10
-        )
-        self.frequency_publisher = self.create_publisher(
-            Float32, "/aid/detection/freq", 10
         )
         self.relative_yaw_publisher = self.create_publisher(
             Float32, "/aid/detection/yaw_rel", 10
@@ -85,15 +89,59 @@ class SystemControlNode(Node):
     def detection_callback(self, message: String) -> None:
         try:
             detection = json.loads(message.data)
-            if self.mode == "explore":
+            now = time.monotonic()
+            if self.mode == "explore" and detection.get("mode") == "explore":
                 self.best_candidate = detection.get("best_candidate")
+                if self.best_candidate:
+                    remaining = float(self.best_candidate["lifetime_seconds"]) - float(
+                        self.best_candidate["age_seconds"]
+                    )
+                    self.best_candidate_expires_at = now + remaining
+            elif self.mode == "focus" and self.focus_arrived:
+                if self.matches_target(detection, self.selected_candidate):
+                    self.focus_signal_at = now
             elif self.mode == "tracking" and self.accepted_target is not None:
-                if detection.get("viable"):
-                    self.last_target_seen_at = time.monotonic()
-                if "delta_db" in detection:
-                    self.tracking_search.add_sample(float(detection["delta_db"]))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            pass
+                if not self.matches_target(detection, self.accepted_target):
+                    self.recovery_samples = 0
+                    return
+                if now - self.last_target_seen_at >= self.tracking_signal_timeout:
+                    self.recovery_samples = 0
+                self.last_target_seen_at = now
+                self.accepted_target["current_frequency_mhz"] = detection["frequency_mhz"]
+                if self.target_lost:
+                    self.recovery_samples += 1
+                    if self.recovery_samples >= 2:
+                        self.target_lost = False
+                        self.recovery_samples = 0
+                        if self.tracking_behavior == "oscillate" and not self.manual_direction:
+                            self.publish_tracking_target(
+                                self.tracking_search.start(self.motor_angle)
+                            )
+                        self.publish_status()
+                else:
+                    self.tracking_search.add_sample(float(detection["amplitude_dbm"]))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            self.get_logger().warning(f"Invalid detection: {error}")
+
+    def matches_target(self, detection: dict, target: dict | None) -> bool:
+        return bool(
+            target is not None
+            and detection.get("mode") == self.mode
+            and detection.get("viable")
+            and detection.get("band") == target.get("band")
+            and math.isfinite(float(detection["frequency_mhz"]))
+            and abs(float(detection["frequency_mhz"]) - float(target["frequency_mhz"]))
+            <= self.tracking_window_mhz
+        )
+
+    def confirmation_available(self) -> bool:
+        return (
+            self.mode == "focus"
+            and self.selected_candidate is not None
+            and self.focus_arrived
+            and self.focus_signal_at > 0.0
+            and time.monotonic() - self.focus_signal_at < self.tracking_signal_timeout
+        )
 
     def angle_callback(self, message: Float32) -> None:
         self.motor_angle = float(message.data) % 360.0
@@ -112,6 +160,8 @@ class SystemControlNode(Node):
         try:
             status = json.loads(message.data)
             if not status.get("connected", False):
+                self.focus_arrived = False
+                self.focus_signal_at = 0.0
                 return
             self.motor_moving = bool(status.get("moving", False))
             angle = float(status.get("angle_deg", self.motor_angle)) % 360.0
@@ -155,6 +205,13 @@ class SystemControlNode(Node):
             name = command["command"]
             if name == "mode":
                 self.set_mode(str(command["mode"]))
+            elif name == "detection_method":
+                method = str(command["method"])
+                if method not in {"baseline", "no_baseline"}:
+                    raise ValueError(f"invalid detection method: {method}")
+                self.accepted_target = None
+                self.set_mode("idle")
+                self.detector_method_publisher.publish(String(data=method))
             elif name == "focus":
                 self.focus_best_candidate()
             elif name == "accept":
@@ -176,6 +233,7 @@ class SystemControlNode(Node):
                 self.configure_rf(command)
             elif name == "target":
                 self.pending_focus = None
+                self.selected_candidate = None
                 self.dual_scheduler.cancel()
                 self.motor_target_publisher.publish(Float32(data=float(command["angle_deg"]) % 360.0))
                 self.set_mode("focus")
@@ -193,12 +251,13 @@ class SystemControlNode(Node):
         self.mode = mode
         self.detector_mode_publisher.publish(String(data=mode))
         self.pending_focus = None
+        self.selected_candidate = None
         self.focus_commanded = False
         self.focus_arrived = False
+        self.focus_signal_at = 0.0
         self.manual_direction = 0
         self.tracking_search.reset(self.motor_angle)
-        if mode in {"calibrate", "explore"}:
-            self.best_candidate = None
+        self.best_candidate = None
         if mode in {"calibrate", "explore"} and self.rf_selection == "dual":
             band = self.rf_ready_band if self.rf_ready_band in DualBandScheduler.BANDS else "2.4"
             self.publish_rf_band(band)
@@ -216,6 +275,13 @@ class SystemControlNode(Node):
 
     def configure_rf(self, command: dict) -> None:
         selection = str(command.get("selection", ""))
+        if selection not in {"dual", "2.4", "5.8", "custom"}:
+            raise ValueError(f"invalid RF selection: {selection}")
+        if self.mode in {"focus", "tracking"}:
+            self.accepted_target = None
+            self.set_mode("idle")
+        self.best_candidate = None
+        self.detector_reset_publisher.publish(Empty())
         if selection == "dual":
             self.rf_selection = "dual"
             band = self.rf_ready_band if self.rf_ready_band in DualBandScheduler.BANDS else "2.4"
@@ -242,10 +308,17 @@ class SystemControlNode(Node):
         )
 
     def focus_best_candidate(self) -> None:
-        if not self.best_candidate or not self.best_candidate.get("viable"):
-            self.publish_status(error="no viable candidate available")
+        if (
+            self.mode != "explore"
+            or not self.best_candidate
+            or not self.best_candidate.get("viable")
+            or time.monotonic() >= self.best_candidate_expires_at
+        ):
+            self.best_candidate = None
+            self.publish_status(error="no recent confirmed candidate available")
             return
         self.selected_candidate = self.best_candidate.copy()
+        self.accepted_target = None
         self.best_candidate = None
         self.detector_reset_publisher.publish(Empty())
         target = float(self.selected_candidate["antenna_angle_deg"]) % 360.0
@@ -253,11 +326,15 @@ class SystemControlNode(Node):
             self.selected_candidate.get("band")
         )
         self.mode = "focus"
+        self.detector_target_publisher.publish(
+            Float32(data=float(self.selected_candidate["frequency_mhz"]))
+        )
         self.detector_mode_publisher.publish(String(data="focus"))
         self.dual_scheduler.cancel()
         self.focus_commanded = False
         self.focus_arrived = False
-        if self.rf_selection == "dual" and candidate_band and candidate_band != self.rf_ready_band:
+        self.focus_signal_at = 0.0
+        if candidate_band and candidate_band != self.rf_ready_band:
             self.pending_focus = {"target": target, "band": candidate_band}
             self.focus_ready_at = time.monotonic() + 5.0
             self.motor_mode_publisher.publish(String(data="stop"))
@@ -274,18 +351,14 @@ class SystemControlNode(Node):
         self.motor_mode_publisher.publish(String(data="focus"))
 
     def accept_selected_candidate(self) -> None:
-        if self.selected_candidate is None or not self.focus_arrived:
-            raise ValueError("focused candidate has not reached its target")
+        if self.selected_candidate is None or not self.confirmation_available():
+            raise ValueError("wait for arrival and a live signal at the focused frequency")
         self.accepted_target = self.selected_candidate.copy()
         self.selected_candidate = None
         self.start_tracking()
 
     def decline_selected_candidate(self) -> None:
-        if self.selected_candidate is None or not self.focus_arrived:
-            raise ValueError("focused candidate has not reached its target")
-        self.selected_candidate = None
-        self.detector_reset_publisher.publish(Empty())
-        self.set_mode("explore")
+        self.discard_candidate()
 
     def discard_candidate(self) -> None:
         self.best_candidate = None
@@ -293,7 +366,7 @@ class SystemControlNode(Node):
         self.accepted_target = None
         self.pending_focus = None
         self.detector_reset_publisher.publish(Empty())
-        self.set_mode("idle")
+        self.set_mode("explore")
 
     def start_tracking(self) -> None:
         if self.accepted_target is None:
@@ -305,6 +378,7 @@ class SystemControlNode(Node):
         self.pending_focus = None
         self.dual_scheduler.cancel()
         self.target_lost = False
+        self.recovery_samples = 0
         self.last_target_seen_at = time.monotonic()
         self.detector_target_publisher.publish(Float32(data=frequency))
         self.detector_mode_publisher.publish(String(data="tracking"))
@@ -357,9 +431,6 @@ class SystemControlNode(Node):
     def publish_tracking_outputs(self) -> None:
         if self.mode != "tracking" or self.accepted_target is None:
             return
-        self.frequency_publisher.publish(
-            Float32(data=float(self.accepted_target["frequency_mhz"]))
-        )
         self.relative_yaw_publisher.publish(Float32(data=self.motor_angle % 360.0))
         if self.absolute_heading is not None:
             self.ned_yaw_publisher.publish(
@@ -368,6 +439,9 @@ class SystemControlNode(Node):
 
     def control_tick(self) -> None:
         now = time.monotonic()
+        if self.best_candidate is not None and now >= self.best_candidate_expires_at:
+            self.best_candidate = None
+            self.publish_status()
         if (
             self.rf_selection == "dual"
             and self.mode in {"calibrate", "explore"}
@@ -395,6 +469,7 @@ class SystemControlNode(Node):
         if now - self.last_target_seen_at >= self.tracking_signal_timeout:
             if not self.target_lost:
                 self.target_lost = True
+                self.recovery_samples = 0
                 self.manual_direction = 0
                 self.tracking_search.reset(self.motor_angle)
                 self.motor_mode_publisher.publish(String(data="stop"))
@@ -421,7 +496,12 @@ class SystemControlNode(Node):
                 self.best_candidate and self.best_candidate.get("viable")
             ),
             "confirmation_available": bool(
-                self.selected_candidate is not None and self.focus_arrived
+                self.confirmation_available()
+            ),
+            "focus_arrived": self.focus_arrived,
+            "selected_frequency_mhz": (
+                self.selected_candidate["frequency_mhz"]
+                if self.selected_candidate is not None else None
             ),
             "candidate_selected": self.selected_candidate is not None,
             "tracking_available": self.accepted_target is not None,
@@ -429,7 +509,9 @@ class SystemControlNode(Node):
             "tracking_phase": self.tracking_search.phase,
             "target_lost": self.target_lost,
             "tracked_frequency_mhz": (
-                float(self.accepted_target["frequency_mhz"])
+                float(self.accepted_target.get(
+                    "current_frequency_mhz", self.accepted_target["frequency_mhz"]
+                ))
                 if self.accepted_target is not None
                 else None
             ),

@@ -20,6 +20,17 @@ def normalize_signed(angle: float) -> float:
     return (angle + 180.0) % 360.0 - 180.0
 
 
+def update_signed_heading(heading: float, previous: float | None) -> float:
+    if previous is None:
+        return heading % 360.0
+    continuous = previous + normalize_signed(heading - previous)
+    if continuous >= 360.0:
+        continuous -= 360.0
+    elif continuous <= -360.0:
+        continuous += 360.0
+    return continuous
+
+
 class QMC5883P:
     def __init__(self, bus: int, address: int) -> None:
         self.file_descriptor = os.open(f"/dev/i2c-{bus}", os.O_RDWR)
@@ -58,6 +69,7 @@ class CompassNode(Node):
         )
         self.reference_heading: float | None = None
         self.latest_heading: float | None = None
+        self.signed_heading: float | None = None
         self.heading_publisher = self.create_publisher(Float32, "/aid/compass/relative_heading_deg", 20)
         self.absolute_heading_publisher = self.create_publisher(
             Float32, "/aid/compass/heading_deg", 20
@@ -82,6 +94,7 @@ class CompassNode(Node):
         scale = 100.0 / 3750.0
         x_ut, y_ut, z_ut = raw_x * scale, raw_y * scale, raw_z * scale
         self.latest_heading = math.degrees(math.atan2(y_ut, x_ut)) % 360.0
+        self.signed_heading = update_signed_heading(self.latest_heading, self.signed_heading)
         if self.reference_heading is None:
             self.reference_heading = self.latest_heading
         relative = normalize_signed(self.latest_heading - self.reference_heading)
@@ -92,6 +105,7 @@ class CompassNode(Node):
             "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "relative_heading_deg": round(relative, 3),
             "heading_deg": round(self.latest_heading, 3),
+            "signed_heading_deg": round(self.signed_heading, 3),
             "magnetic_ut": {"x": round(x_ut, 3), "y": round(y_ut, 3), "z": round(z_ut, 3)},
         }
         self.status_publisher.publish(String(data=json.dumps(status, separators=(",", ":"))))

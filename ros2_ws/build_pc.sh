@@ -8,9 +8,9 @@ ROS_DISTRO=${ROS_DISTRO:-jazzy}
 source "/opt/ros/$ROS_DISTRO/setup.bash"
 set -u
 
-if ! /usr/bin/python3 -c 'import tkinter; from PIL import Image, ImageTk' 2>/dev/null; then
+if ! /usr/bin/python3 -c 'import tkinter; import zmq; from PIL import Image, ImageTk' 2>/dev/null; then
     printf '%s\n' 'Missing GUI dependencies. Install them with:' >&2
-    printf '%s\n' '  sudo apt install python3-tk python3-pil python3-pil.imagetk' >&2
+    printf '%s\n' '  sudo apt install python3-tk python3-pil python3-pil.imagetk python3-zmq' >&2
     exit 1
 fi
 

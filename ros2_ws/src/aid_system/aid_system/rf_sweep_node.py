@@ -23,7 +23,7 @@ class RfSweepNode(Node):
         self.declare_parameter("port", find_rf_port())
         self.declare_parameter("baudrate", 500000)
         self.declare_parameter("timeout", 10.0)
-        self.declare_parameter("initial_band", "2.4")
+        self.declare_parameter("initial_band", "5.8")
         self.sweep_publisher = self.create_publisher(String, "/aid/rf/sweep", 10)
         self.status_publisher = self.create_publisher(String, "/aid/rf/status", 10)
         self.last_status = {"connected": False, "state": "starting"}

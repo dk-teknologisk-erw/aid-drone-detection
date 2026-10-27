@@ -1,11 +1,12 @@
 import json
+import time
 from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Empty, Float32, String
 
-from .detection import BaselineModel
+from .detection import BaselineModel, CandidateHistory, analyze_without_baseline, live_maximum
 from .ros_utils import run_node
 
 
@@ -17,6 +18,13 @@ class DetectorNode(Node):
         self.declare_parameter("minimum_delta_db", 6.0)
         self.declare_parameter("minimum_z_score", 4.0)
         self.declare_parameter("std_floor_db", 1.5)
+        self.declare_parameter("detection_method", "no_baseline")
+        self.declare_parameter("minimum_snr_db", 6.0)
+        self.declare_parameter("tracking_minimum_snr_db", 4.0)
+        self.declare_parameter("tracking_minimum_delta_db", 4.0)
+        self.declare_parameter("tracking_minimum_z_score", 3.0)
+        self.declare_parameter("tracking_window_mhz", 10.0)
+        self.declare_parameter("candidate_lifetime_seconds", 45.0)
         self.declare_parameter("excluded_ranges_mhz", [2402.0, 2422.0])
         self.baseline_path = Path(str(self.get_parameter("baseline_path").value))
         excluded_values = [
@@ -34,14 +42,20 @@ class DetectorNode(Node):
         except (OSError, ValueError, json.JSONDecodeError) as error:
             self.get_logger().warning(f"Could not load baseline: {error}")
         self.mode = "idle"
+        self.method = str(self.get_parameter("detection_method").value)
+        if self.method not in {"baseline", "no_baseline"}:
+            raise ValueError("detection_method must be baseline or no_baseline")
         self.motor_angle = 0.0
         self.relative_heading = 0.0
         self.target_frequency_mhz: float | None = None
-        self.best_candidate: dict | None = None
-        self.best_candidates: dict[str, dict] = {}
+        self.history = CandidateHistory(
+            float(self.get_parameter("candidate_lifetime_seconds").value)
+        )
         self.detection_publisher = self.create_publisher(String, "/aid/detection", 20)
         self.status_publisher = self.create_publisher(String, "/aid/detector/status", 10)
         self.create_subscription(String, "/aid/detector/mode", self.mode_callback, 10)
+        self.create_subscription(String, "/aid/detector/method", self.method_callback, 10)
+        self.create_timer(1.0, self.publish_status)
         self.create_subscription(
             Float32,
             "/aid/detector/target_mhz",
@@ -63,17 +77,31 @@ class DetectorNode(Node):
                 self.get_logger().error(f"Could not save baseline: {error}")
         if message.data == "calibrate" and self.mode != "calibrate":
             self.baseline.clear()
+            self.method = "baseline"
         self.mode = message.data
-        self.best_candidate = None
-        self.best_candidates.clear()
-        self.status_publisher.publish(String(data=json.dumps({"mode": self.mode})))
+        if self.mode not in {"focus", "tracking"}:
+            self.target_frequency_mhz = None
+        self.history.clear()
+        self.publish_status()
+
+    def publish_status(self) -> None:
+        self.status_publisher.publish(String(data=json.dumps({
+            "mode": self.mode, "method": self.method,
+        })))
+
+    def method_callback(self, message: String) -> None:
+        if message.data not in {"baseline", "no_baseline"}:
+            self.get_logger().warning(f"Invalid detection method: {message.data}")
+            return
+        self.method = message.data
+        self.history.clear()
+        self.publish_status()
 
     def target_frequency_callback(self, message: Float32) -> None:
         self.target_frequency_mhz = float(message.data)
 
     def reset_callback(self, _message: Empty) -> None:
-        self.best_candidate = None
-        self.best_candidates.clear()
+        self.history.clear()
 
     def angle_callback(self, message: Float32) -> None:
         self.motor_angle = float(message.data) % 360.0
@@ -86,20 +114,40 @@ class DetectorNode(Node):
             sweep = json.loads(message.data)
             if sweep.get("schema") != "aid.rf_sweep.v1":
                 return
+            maximum = live_maximum(sweep)
+            following = self.mode in {"focus", "tracking"}
+            retaining = self.mode == "tracking"
+            target = self.target_frequency_mhz if following else None
             if self.mode == "calibrate":
                 count = self.baseline.update(sweep)
                 result = {"viable": False, "reason": "calibrating", "baseline_samples": count}
             elif self.mode == "tracking" and self.target_frequency_mhz is None:
                 result = {"viable": False, "reason": "no_tracking_target"}
+            elif self.method == "no_baseline":
+                result = analyze_without_baseline(
+                    sweep,
+                    float(self.get_parameter("smoothing_mhz").value),
+                    float(self.get_parameter(
+                        "tracking_minimum_snr_db" if retaining else "minimum_snr_db"
+                    ).value),
+                    self.excluded_ranges_mhz,
+                    target,
+                    float(self.get_parameter("tracking_window_mhz").value),
+                )
             else:
                 result = self.baseline.analyze(
                     sweep,
                     float(self.get_parameter("smoothing_mhz").value),
-                    float(self.get_parameter("minimum_delta_db").value),
-                    float(self.get_parameter("minimum_z_score").value),
+                    float(self.get_parameter(
+                        "tracking_minimum_delta_db" if retaining else "minimum_delta_db"
+                    ).value),
+                    float(self.get_parameter(
+                        "tracking_minimum_z_score" if retaining else "minimum_z_score"
+                    ).value),
                     float(self.get_parameter("std_floor_db").value),
                     self.excluded_ranges_mhz,
-                    self.target_frequency_mhz if self.mode == "tracking" else None,
+                    target,
+                    float(self.get_parameter("tracking_window_mhz").value),
                 )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             self.get_logger().warning(f"Invalid RF sweep: {error}")
@@ -110,20 +158,20 @@ class DetectorNode(Node):
             "timestamp_utc": sweep.get("timestamp_utc"),
             "mode": self.mode,
             "band": sweep.get("band"),
+            "method": self.method,
+            "live_maximum": maximum,
             "antenna_angle_deg": round(self.motor_angle, 3),
             "relative_bearing_deg": round((self.motor_angle + self.relative_heading) % 360.0, 3),
             **result,
         }
-        if candidate.get("viable") and self.mode == "explore":
-            band = str(candidate["band"])
-            current_band_best = self.best_candidates.get(band)
-            if current_band_best is None or float(candidate["z_score"]) > float(current_band_best["z_score"]):
-                self.best_candidates[band] = candidate.copy()
-            self.best_candidate = max(
-                self.best_candidates.values(), key=lambda value: float(value["z_score"])
-            )
-        candidate["best_candidates"] = self.best_candidates
-        candidate["best_candidate"] = self.best_candidate
+        now = time.monotonic()
+        if self.mode == "explore":
+            self.history.observe(candidate, now)
+        best_candidates = self.history.candidates(now)
+        candidate["best_candidates"] = best_candidates
+        candidate["best_candidate"] = max(
+            best_candidates.values(), key=lambda value: float(value["score"]), default=None
+        )
         self.detection_publisher.publish(String(data=json.dumps(candidate, separators=(",", ":"))))
 
 

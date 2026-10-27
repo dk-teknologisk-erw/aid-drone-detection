@@ -16,7 +16,7 @@ setup(
         (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
     ],
-    install_requires=["setuptools"],
+    install_requires=["setuptools", "pyzmq"],
     zip_safe=True,
     maintainer="erw",
     maintainer_email="erw@teknologisk.dk",
