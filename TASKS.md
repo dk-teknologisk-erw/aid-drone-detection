@@ -21,3 +21,6 @@ I want to have three modes, one is exploring where the tower turns and the RF id
 - Use real-time RF amplitudes, not persistent max-hold, for direction comparison. Match candidates across headings by band/frequency and timestamp.
 - Verified motor wiring uses STEP GPIO 0, DIR GPIO 1, and active-low A4988 ENABLE GPIO 2. Integrated firmware disables coil power while stopped.
 - USB may reconnect through the slip contact; prefer `/dev/serial/by-id` identity over fixed tty numbers. Setup commands are in `SETUP.md`.
+- Default operation is now no-baseline/live-SNR detection on 5.8 GHz, so reboot does not require a drone-free calibration. Saved-baseline detection remains selectable and reuses the persistent JSON baseline.
+- The GUI shows the latest raw RF maximum separately from the focused target. `Send Freq ROS2` publishes it once as Float32 MHz on `/aid/detection/freq`; there is no automatic frequency publication during Tracking.
+- Focus Best uses a repeated, expiring candidate. Confirm requires motor arrival and fresh target-region RF; Discard resumes Explore. Tracking tolerates nearby frequency changes and can recover after a dropout. See `STATUS.md` for thresholds and limitations.

@@ -22,6 +22,10 @@ class SystemControlNode(Node):
         self.accepted_target: dict | None = None
         self.motor_angle = 0.0
         self.motor_moving = False
+        self.motor_status_at = 0.0
+        self.jog_direction = 0
+        self.jog_expires_at = 0.0
+        self.jog_next_at = 0.0
         self.absolute_heading: float | None = None
         self.rf_selection = "5.8"
         self.rf_ready_band: str | None = None
@@ -160,14 +164,20 @@ class SystemControlNode(Node):
         try:
             status = json.loads(message.data)
             if not status.get("connected", False):
+                self.motor_status_at = 0.0
+                self.stop_focus_jog()
                 self.focus_arrived = False
                 self.focus_signal_at = 0.0
                 return
             self.motor_moving = bool(status.get("moving", False))
             angle = float(status.get("angle_deg", self.motor_angle)) % 360.0
+            if not math.isfinite(angle):
+                raise ValueError("non-finite motor angle")
         except (TypeError, ValueError, json.JSONDecodeError):
             return
         now = time.monotonic()
+        self.motor_status_at = now
+        self.motor_angle = angle
         if (
             self.mode == "focus"
             and self.selected_candidate is not None
@@ -226,6 +236,8 @@ class SystemControlNode(Node):
                 self.set_manual_motion(
                     str(command["action"]), str(command.get("direction", ""))
                 )
+            elif name == "jog":
+                self.set_focus_jog(str(command["action"]), str(command.get("direction", "")))
             elif name == "speed":
                 self.speed_dps = max(0.1, min(90.0, float(command["speed_dps"])))
                 self.motor_speed_publisher.publish(Float32(data=self.speed_dps))
@@ -245,6 +257,7 @@ class SystemControlNode(Node):
     def set_mode(self, mode: str) -> None:
         if mode not in {"idle", "calibrate", "explore", "focus", "tracking"}:
             raise ValueError(f"invalid mode: {mode}")
+        self.stop_focus_jog()
         if mode == "tracking":
             self.start_tracking()
             return
@@ -318,6 +331,7 @@ class SystemControlNode(Node):
             self.publish_status(error="no recent confirmed candidate available")
             return
         self.selected_candidate = self.best_candidate.copy()
+        self.stop_focus_jog()
         self.accepted_target = None
         self.best_candidate = None
         self.detector_reset_publisher.publish(Empty())
@@ -371,6 +385,7 @@ class SystemControlNode(Node):
     def start_tracking(self) -> None:
         if self.accepted_target is None:
             raise ValueError("no accepted target available")
+        self.stop_focus_jog()
         frequency = float(self.accepted_target["frequency_mhz"])
         self.mode = "tracking"
         self.focus_commanded = False
@@ -424,6 +439,42 @@ class SystemControlNode(Node):
             raise ValueError(f"invalid manual action: {action}")
         self.publish_status()
 
+    def stop_focus_jog(self) -> None:
+        if self.jog_direction:
+            self.jog_direction = 0
+            self.motor_mode_publisher.publish(String(data="stop"))
+
+    def set_focus_jog(self, action: str, direction: str) -> None:
+        if action == "stop":
+            self.stop_focus_jog()
+            return
+        if action not in {"start", "keepalive"} or direction not in {"left", "right"}:
+            raise ValueError("jog requires start/keepalive/stop and left/right direction")
+        now = time.monotonic()
+        sign = 1 if direction == "right" else -1
+        if now - self.motor_status_at >= 0.5:
+            self.stop_focus_jog()
+            raise ValueError("manual focus requires fresh connected motor telemetry")
+        if not math.isfinite(self.manual_step_deg) or not 0 < self.manual_step_deg <= 30:
+            raise ValueError("manual_step_deg must be > 0 and <= 30 degrees")
+        if action == "start":
+            self.accepted_target = None
+            self.set_mode("idle")
+            self.mode = "focus"
+            self.detector_mode_publisher.publish(String(data="focus"))
+            self.detector_reset_publisher.publish(Empty())
+            self.jog_direction = sign
+            self.jog_next_at = 0.0
+        elif (
+            self.mode != "focus" or self.jog_direction != sign or now >= self.jog_expires_at
+        ):
+            self.stop_focus_jog()
+            raise ValueError("manual focus jog expired; release and press again")
+        self.jog_expires_at = now + 0.5
+        if action == "start":
+            self.control_tick()
+            self.publish_status()
+
     def publish_tracking_target(self, target: float) -> None:
         self.motor_target_publisher.publish(Float32(data=target % 360.0))
         self.motor_mode_publisher.publish(String(data="focus"))
@@ -439,6 +490,16 @@ class SystemControlNode(Node):
 
     def control_tick(self) -> None:
         now = time.monotonic()
+        if self.jog_direction:
+            if now >= self.jog_expires_at or now - self.motor_status_at >= 0.5:
+                self.stop_focus_jog()
+                self.publish_status(error="manual focus stopped: keepalive or motor telemetry expired")
+            elif now >= self.jog_next_at:
+                self.publish_tracking_target(
+                    self.motor_angle + self.jog_direction * self.manual_step_deg
+                )
+                self.jog_next_at = now + 0.1
+            return
         if self.best_candidate is not None and now >= self.best_candidate_expires_at:
             self.best_candidate = None
             self.publish_status()
@@ -506,6 +567,7 @@ class SystemControlNode(Node):
             "candidate_selected": self.selected_candidate is not None,
             "tracking_available": self.accepted_target is not None,
             "tracking_behavior": self.tracking_behavior,
+            "manual_direction": self.manual_direction,
             "tracking_phase": self.tracking_search.phase,
             "target_lost": self.target_lost,
             "tracked_frequency_mhz": (

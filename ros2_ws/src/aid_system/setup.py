@@ -31,6 +31,7 @@ setup(
             "operator_gui = aid_system.operator_gui:main",
             "rf_sweep = aid_system.rf_sweep_node:main",
             "system_control = aid_system.control_node:main",
+            "zmq_receiver = aid_system.zmq_receiver:main",
         ],
     },
 )

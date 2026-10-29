@@ -14,6 +14,7 @@ from std_msgs.msg import Float32, String
 import zmq
 
 from .camera_preview import decode_preview
+from .follower_panel import FollowerPanel
 from .orientation_sender import orientation_endpoint, send_orientation
 
 
@@ -40,6 +41,10 @@ class OperatorGui(Node):
         self.root.geometry(f"{BASE_WINDOW_SIZE[0]}x{BASE_WINDOW_SIZE[1]}")
         self.root.minsize(BASE_WINDOW_SIZE[0], 480)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.bind("<FocusOut>", lambda _event: self.stop_focus_jog())
+        self.root.bind("<Unmap>", lambda _event: self.stop_focus_jog())
+        self.jog_direction: str | None = None
+        self.jog_after_id: str | None = None
         self.mode_text = tk.StringVar(value="Mode: unknown")
         self.motor_text = tk.StringVar(value="Motor: waiting")
         self.rf_text = tk.StringVar(value="RF: waiting")
@@ -53,6 +58,9 @@ class OperatorGui(Node):
         self.maximum_label = ""
         self.detection_method = tk.StringVar(value="no_baseline")
         self.compass_heading: float | None = None
+        self.compass_received_at = 0.0
+        self.cue_motor: dict = {}
+        self.cue_motor_at = 0.0
         self.orientation_ip = tk.StringVar()
         self.orientation_port = tk.StringVar()
         self.orientation_status = tk.StringVar(value="Not sent")
@@ -207,6 +215,16 @@ class OperatorGui(Node):
         ).pack(side="left", padx=8)
         ttk.Label(target_frame, text="deg").pack(side="left")
         ttk.Button(target_frame, text="Focus orientation", command=self.apply_manual_target).pack(side="left", padx=12)
+        self.move_left_button = ttk.Button(target_frame, text="Move left")
+        self.move_left_button.pack(side="left", padx=4)
+        self.move_right_button = ttk.Button(target_frame, text="Move right")
+        self.move_right_button.pack(side="left", padx=4)
+        for button, direction in (
+            (self.move_left_button, "left"), (self.move_right_button, "right"),
+        ):
+            button.bind("<ButtonPress-1>", lambda _event, selected=direction: self.start_focus_jog(selected))
+            button.bind("<ButtonRelease-1>", lambda _event: self.stop_focus_jog())
+            button.bind("<Leave>", lambda _event: self.stop_focus_jog())
 
         rf_frame = ttk.LabelFrame(root, text="RF scan", padding=10)
         rf_frame.pack(fill="x", pady=(10, 0))
@@ -255,6 +273,8 @@ class OperatorGui(Node):
         self.orientation_ip.trace_add("write", self.update_orientation_send_button)
         self.orientation_port.trace_add("write", self.update_orientation_send_button)
 
+        self.follower_panel = FollowerPanel(root, self.follower_bearing)
+
         status_frame = ttk.LabelFrame(root, text="Live status", padding=10)
         status_frame.pack(fill="both", expand=True, pady=(10, 0))
         self.status_frame = status_frame
@@ -270,6 +290,8 @@ class OperatorGui(Node):
         ttk.Label(self.preview_frame, textvariable=self.preview_status, anchor="w").pack(fill="x", pady=(8, 0))
 
     def send(self, command: str = "mode", mode: str | None = None, **fields) -> None:
+        if command != "jog":
+            self.stop_focus_jog()
         if mode is not None:
             fields["mode"] = mode
         fields["command"] = command
@@ -294,6 +316,34 @@ class OperatorGui(Node):
             "<ButtonRelease-1>",
             lambda _event: self.send(command="manual", action="stop"),
         )
+
+    def start_focus_jog(self, direction: str) -> None:
+        self.stop_focus_jog()
+        if time.monotonic() - self.cue_motor_at >= 0.5 or not self.cue_motor.get("connected"):
+            self.motor_text.set("Motor: waiting for fresh connected telemetry")
+            return
+        self.jog_direction = direction
+        self.send(command="jog", action="start", direction=direction)
+        self.jog_after_id = self.root.after(100, self.renew_focus_jog)
+
+    def renew_focus_jog(self) -> None:
+        self.jog_after_id = None
+        if self.jog_direction is None:
+            return
+        if time.monotonic() - self.cue_motor_at >= 0.5 or not self.cue_motor.get("connected"):
+            self.stop_focus_jog()
+            self.motor_text.set("Motor: manual focus stopped; telemetry unavailable")
+            return
+        self.send(command="jog", action="keepalive", direction=self.jog_direction)
+        self.jog_after_id = self.root.after(100, self.renew_focus_jog)
+
+    def stop_focus_jog(self) -> None:
+        if self.jog_after_id is not None:
+            self.root.after_cancel(self.jog_after_id)
+            self.jog_after_id = None
+        if self.jog_direction is not None:
+            self.jog_direction = None
+            self.send(command="jog", action="stop")
 
     def apply_manual_target(self) -> None:
         try:
@@ -447,6 +497,8 @@ class OperatorGui(Node):
 
     def motor_callback(self, message: String) -> None:
         data = self.decode(message)
+        self.cue_motor = data
+        self.cue_motor_at = time.monotonic()
         if not data.get("connected", False):
             self.motor_text.set(f"Motor: disconnected ({data.get('error', 'waiting')})")
             return
@@ -474,10 +526,12 @@ class OperatorGui(Node):
         except (TypeError, ValueError):
             heading = None
         if heading is None or not math.isfinite(heading):
+            self.compass_received_at = 0.0
             self.compass_heading = None
             self.compass_text.set("Magnetic heading: waiting")
         else:
             self.compass_heading = heading
+            self.compass_received_at = time.monotonic()
             self.compass_text.set(f"Magnetic heading: {heading:+.1f} deg")
         self.update_orientation_send_button()
 
@@ -518,6 +572,18 @@ class OperatorGui(Node):
                 f"SNR {float(data.get('snr_db', 0)):.1f} dB | "
                 f"baseline samples {data.get('baseline_samples', 0)}"
             )
+
+    def follower_bearing(self) -> float:
+        now = time.monotonic()
+        if self.compass_heading is None or now - self.compass_received_at >= 2.0:
+            raise ValueError("Waiting for fresh antenna compass heading")
+        if (
+            now - self.cue_motor_at >= 1.0
+            or not self.cue_motor.get("connected")
+            or self.cue_motor.get("moving", True)
+        ):
+            raise ValueError("Antenna must be stationary with fresh motor telemetry")
+        return self.compass_heading
 
     def toggle_preview(self) -> None:
         if self.preview_visible:
@@ -597,6 +663,8 @@ class OperatorGui(Node):
             self.root.after(20, self.spin_once)
 
     def close(self) -> None:
+        self.stop_focus_jog()
+        self.follower_panel.close()
         if self.orientation_after_id is not None:
             self.root.after_cancel(self.orientation_after_id)
             self.orientation_after_id = None
